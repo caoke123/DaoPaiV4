@@ -1,6 +1,6 @@
 # DaoPai V3 Phase 4-B：Agent Token 与 workstation 鉴权设计
 
-> 版本：v1.0
+> 版本：v1.1
 > 日期：2026-06-29
 > 阶段：Phase 4-B（鉴权设计，仅文档，不写 Agent 闭环代码）
 > 前置 commit：`f4c0dc9` — docs: define Local Agent boundary
@@ -62,6 +62,54 @@ Agent Token → /agent/* → Local Agent 程序
 |--------|------|----------|----------|
 | `authMiddleware` | `backend/auth/authMiddleware.ts`（已存在） | `/api/*` | 解析 Bearer JWT → UserPrincipal |
 | `requireAgent` | `backend/auth/agentAuth.ts`（已有占位，待实现） | `/agent/*` | 解析 Bearer agentToken → AgentPrincipal |
+
+### 2.4 前端业务命名统一
+
+面向前端和用户的命名，统一采用快递公司通用语言，不显示技术英文词：
+
+| 技术名 | 前端显示 |
+|--------|----------|
+| tenant / tenant_id | 快递公司 |
+| site / site_id | 网点 |
+| workstation | 执行电脑 |
+| Agent Token | 执行电脑授权码 |
+| Agent | 本地执行端 |
+| browser_status | 本地运行环境 |
+| online_status | 在线状态 |
+| last_heartbeat_at | 最后在线时间 |
+| agent_version | 执行端版本 |
+
+**禁止前端显示的技术字段：**
+
+```
+agent_token_hash
+tenant_id
+site_id
+machine_fingerprint
+workstationId
+```
+
+**前端推荐表格列：**
+
+```
+执行电脑名称 | 快递公司 | 所属网点 | 在线状态 | 本地运行环境 | 最后在线 | 启用状态
+```
+
+**详情中可显示：**
+
+```
+设备编号
+执行端版本
+最近连接地址
+添加时间
+更新时间
+```
+
+**授权码安全规则：**
+
+- 执行电脑授权码**仅在创建或重新生成时显示一次**
+- 前端列表、详情中**任何时候都不能展示授权码明文**
+- 普通网点人员（operator 角色）不能看到 tenant_id、site_id、agent_token_hash 等技术字段
 
 ---
 
@@ -147,8 +195,23 @@ CREATE TABLE IF NOT EXISTS workstations (
 ```sql
 -- 004_v3_agent_token_auth.sql
 
--- 1. 重命名 agent_token → agent_token_hash
-ALTER TABLE workstations RENAME COLUMN agent_token TO agent_token_hash;
+-- 1. 重命名 agent_token → agent_token_hash（需幂等处理）
+--    注意：不能直接无条件 RENAME COLUMN，否则重复执行会失败。
+--    实现时需要先检查 agent_token 是否存在、agent_token_hash 是否不存在。
+--    只有满足条件时才执行重命名。
+--    PostgreSQL 可使用 DO $$ BEGIN ... END $$ 查询 information_schema.columns 后再执行动态 SQL。
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'workstations' AND column_name = 'agent_token'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'workstations' AND column_name = 'agent_token_hash'
+  ) THEN
+    ALTER TABLE workstations RENAME COLUMN agent_token TO agent_token_hash;
+  END IF;
+END $$;
 
 -- 2. 新增字段
 ALTER TABLE workstations ADD COLUMN IF NOT EXISTS agent_token_created_at TIMESTAMPTZ;
@@ -226,10 +289,16 @@ daopai_agent_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4y5z6
 
 ### 5.6 轮换策略
 
-- 管理员可重新生成 token（旧 token 自动撤销）
-- 旧 token 的 `agent_token_revoked_at` 设为当前时间
-- 新 token 覆盖 `agent_token_hash` 和 `agent_token_created_at`
-- 旧 Agent 使用旧 token 请求时收到 401，需等待重新配置
+- 管理员可重新生成执行电脑授权码（旧授权码自然失效）
+- 重新生成时：
+  1. 生成新的 agentToken
+  2. 覆盖 `agent_token_hash = newHash`
+  3. 更新 `agent_token_created_at = NOW()`
+  4. 清空 `agent_token_revoked_at = NULL`（新 token 必须可用）
+  5. 清空 `agent_token_last_used_at = NULL`（新 token 尚未被使用）
+  6. 旧 token 因 hash 被覆盖自然失效，无需记录 revoked_at
+
+**第一版不保留旧 token 历史。** 如未来需要审计旧 token，再单独设计 `agent_tokens` 历史表。
 
 ### 5.7 最后使用时间
 
@@ -281,9 +350,17 @@ export function generateAgentToken(): { plaintext: string; hash: string } {
 
 /**
  * 验证 Agent Token 是否匹配数据库中的 hash
+ *
+ * 建议使用 crypto.timingSafeEqual() 做时间恒定比较，避免时序攻击。
+ * Agent Token 是 32 字节随机数生成的长 token，风险较低，
+ * 但正式实现时仍建议使用 timingSafeEqual。
  */
 export function verifyAgentToken(plaintext: string, storedHash: string): boolean {
-  return hashAgentToken(plaintext) === storedHash;
+  const computed = hashAgentToken(plaintext);
+  const bufA = Buffer.from(computed, 'hex');
+  const bufB = Buffer.from(storedHash, 'hex');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 ```
 
@@ -296,58 +373,129 @@ import { hashAgentToken } from './agentToken';
 import { pgDb } from '../db/PgDatabase';
 
 /**
- * 从请求中解析 Agent Token 并验证，返回 AgentPrincipal 或 null
+ * 结构化鉴权结果
+ *
+ * 不再用 null 表示所有失败，而是区分具体失败原因，
+ * 让 requireAgent 能返回准确的 HTTP 状态码和错误码。
  */
-export async function parseAgentToken(req: Request): Promise<AgentPrincipal | null> {
+export type AgentAuthResult =
+  | {
+      ok: true;
+      principal: AgentPrincipal;
+    }
+  | {
+      ok: false;
+      status: 401 | 403;
+      code:
+        | 'AGENT_TOKEN_MISSING'
+        | 'AGENT_TOKEN_INVALID'
+        | 'AGENT_TOKEN_REVOKED'
+        | 'WORKSTATION_DISABLED'
+        | 'WORKSTATION_DELETED';
+      message: string;
+    };
+
+/**
+ * 从请求中解析 Agent Token 并验证，返回结构化 AgentAuthResult
+ */
+export async function parseAgentToken(req: Request): Promise<AgentAuthResult> {
   const authHeader = req.headers.authorization;
-  if (!authHeader) return null;
+  if (!authHeader) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'AGENT_TOKEN_MISSING',
+      message: '未携带执行电脑授权码',
+    };
+  }
 
   const parts = authHeader.split(' ');
-  if (parts.length !== 2 || parts[0] !== 'Bearer') return null;
+  if (parts.length !== 2 || parts[0] !== 'Bearer') {
+    return {
+      ok: false,
+      status: 401,
+      code: 'AGENT_TOKEN_INVALID',
+      message: '执行电脑授权码格式错误',
+    };
+  }
 
   const plaintext = parts[1];
   const tokenHash = hashAgentToken(plaintext);
 
   // 从数据库查询匹配的 workstation
   const ws = await pgDb.getWorkstationByTokenHash(tokenHash);
-  if (!ws) return null;
+  if (!ws) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'AGENT_TOKEN_INVALID',
+      message: '执行电脑授权码无效',
+    };
+  }
 
   // 检查 token 是否被撤销
-  if (ws.agentTokenRevokedAt) return null;
+  if (ws.agentTokenRevokedAt) {
+    return {
+      ok: false,
+      status: 401,
+      code: 'AGENT_TOKEN_REVOKED',
+      message: '执行电脑授权码已被撤销',
+    };
+  }
 
   // 检查 workstation 是否被禁用
-  if (ws.status === 'disabled' || ws.status === 'deleted') return null;
+  if (ws.status === 'disabled') {
+    return {
+      ok: false,
+      status: 403,
+      code: 'WORKSTATION_DISABLED',
+      message: '执行电脑已被停用',
+    };
+  }
+
+  if (ws.status === 'deleted') {
+    return {
+      ok: false,
+      status: 403,
+      code: 'WORKSTATION_DELETED',
+      message: '执行电脑已被删除',
+    };
+  }
 
   return {
-    type: 'agent',
-    tenantId: ws.tenantId,
-    workstationId: ws.id,
-    siteId: ws.siteId,
+    ok: true,
+    principal: {
+      type: 'agent',
+      tenantId: ws.tenantId,
+      workstationId: ws.id,
+      siteId: ws.siteId,
+    },
   };
 }
 
 /**
  * requireAgent 中间件
  *
- * 要求当前请求携带有效 Agent Token，否则返回 401/403。
+ * 要求当前请求携带有效 Agent Token，否则返回准确的 401/403。
  * 用于 /agent/* 路由保护。
  */
 export async function requireAgent(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const principal = await parseAgentToken(req);
+  const result = await parseAgentToken(req);
 
-  if (!principal) {
-    res.status(401).json({
+  if (!result.ok) {
+    res.status(result.status).json({
       ok: false,
-      code: 'AGENT_TOKEN_INVALID',
-      message: 'Agent Token 无效或已过期',
+      code: result.code,
+      message: result.message,
+      timestamp: new Date().toISOString(),
     });
     return;
   }
 
   // 注入 principal 到 request
-  req.principal = principal;
-  req.tenantId = principal.tenantId;
-  req.workstationId = principal.workstationId;
+  req.principal = result.principal;
+  req.tenantId = result.principal.tenantId;
+  req.workstationId = result.principal.workstationId;
 
   next();
 }
@@ -357,12 +505,12 @@ export async function requireAgent(req: Request, res: Response, next: NextFuncti
 
 | 场景 | HTTP 状态码 | 错误码 | 说明 |
 |------|------------|--------|------|
-| 无 Authorization header | 401 | `AGENT_TOKEN_MISSING` | 未携带 Token |
+| 无 Authorization header | 401 | `AGENT_TOKEN_MISSING` | 未携带执行电脑授权码 |
 | Token 格式错误 | 401 | `AGENT_TOKEN_INVALID` | 格式不是 Bearer xxx |
-| Token 不匹配 | 401 | `AGENT_TOKEN_INVALID` | hash 不匹配任何 workstation |
+| Token 不匹配 | 401 | `AGENT_TOKEN_INVALID` | hash 不匹配任何执行电脑 |
 | Token 已撤销 | 401 | `AGENT_TOKEN_REVOKED` | agent_token_revoked_at 不为空 |
-| workstation 已禁用 | 403 | `WORKSTATION_DISABLED` | status = disabled |
-| workstation 已删除 | 403 | `WORKSTATION_DELETED` | status = deleted |
+| 执行电脑已停用 | 403 | `WORKSTATION_DISABLED` | status = disabled |
+| 执行电脑已删除 | 403 | `WORKSTATION_DELETED` | status = deleted |
 
 ### 6.4 统一响应格式
 
@@ -405,18 +553,45 @@ POST /api/cloud/workstations
 6. 返回 { workstationId, name, agentToken (明文，仅此一次) }
 ```
 
-### 7.3 重新生成 token 流程
+### 7.3 重新生成执行电脑授权码流程
 
 ```
 POST /api/cloud/workstations/:id/token
 
 1. 验证 tenantId 和 workstationId 归属
 2. 调用 generateAgentToken() 生成新 token
-3. UPDATE workstations SET agent_token_hash = newHash, agent_token_created_at = NOW(), agent_token_revoked_at = NOW()（旧 token 自动撤销）
-4. 返回 { agentToken (明文，仅此一次) }
+3. UPDATE workstations SET
+     agent_token_hash = newHash,
+     agent_token_created_at = NOW(),
+     agent_token_revoked_at = NULL,    -- 新 token 必须可用，清空撤销标记
+     agent_token_last_used_at = NULL   -- 新 token 尚未被使用
+4. 旧 token 因 hash 被覆盖自然失效
+5. 返回 { agentToken (明文，仅此一次) }
 ```
 
-### 7.4 前端 UI（第一版最小）
+**注意**：不能同时设置 `agent_token_revoked_at = NOW()`，否则新 token 也会被当作已撤销处理。
+
+### 7.4 执行电脑管理权限边界
+
+执行电脑授权码属于管理级操作，operator 角色不允许管理。
+
+| 操作 | super_admin | tenant_admin | operator |
+|------|:-----------:|:------------:|:--------:|
+| 查看执行电脑 | 可以 | 可以 | 可以（只读） |
+| 创建执行电脑 | 可以 | 可以 | 不可以 |
+| 重新生成授权码 | 可以 | 可以 | 不可以 |
+| 禁用执行电脑 | 可以 | 可以 | 不可以 |
+| 启用执行电脑 | 可以 | 可以 | 不可以 |
+| 删除/移除执行电脑 | 可以 | 可以 | 不可以 |
+
+**明确规则：**
+
+```
+operator 不允许创建、禁用、重新生成执行电脑授权码。
+执行电脑授权码属于管理级操作。
+```
+
+### 7.5 前端 UI（第一版最小）
 
 - 在 `/system?tab=organization` 的"工作站列表"中增加"创建工作站"按钮
 - 创建成功后弹窗展示 agentToken（明文，提示复制后关闭）
