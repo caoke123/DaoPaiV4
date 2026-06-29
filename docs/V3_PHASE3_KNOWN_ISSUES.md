@@ -1,16 +1,21 @@
 # DaoPai V3 Phase 3 已知问题与处理意见
 
+> 最后更新：2026-06-29（Phase 3-J 验收）
+> 当前 commit：`4f83515` — fix: protect frontend routes and simplify system navigation
+
 ## 1. 当前阶段结论
 
-Phase 3-B 最小 JWT 登录基础已完成（commit: 7dfcbaa）。
-npm test 全量 59 tests，55 passed，4 failed。
-4 个失败均为预存问题，与 Phase 3-B 无关。
+Phase 3 全部已完成。npm test 全量 132 tests，128 passed，4 failed。
+4 个失败均为 ISSUE-008（credentials.ts 占位数据），与 Phase 3 所有阶段无关。
 
 ## 2. 已知问题列表
 
 | 编号 | 问题 | 级别 | 是否阻塞 | 当前处理 | 后续建议 |
 | ---- | ---- | ---- | -------- | -------- | -------- |
-| ISSUE-008 | credentials.ts 只有占位数据，导致 4 个 fallback 测试失败 | P2 | 否（不影响功能） | 不修复，测试仅验证 fallback 机制 | 恢复真实凭据数据后可重新启用测试 |
+| ISSUE-008 | credentials.ts 只有占位数据，导致 4 个 fallback 测试失败 | P2 | 否（不影响功能） | 不修复，测试仅验证 fallback 机制 | 恢复真实凭据数据后可重新启用测试；或 mock 测试 |
+| EasyBR 依赖 | V2 残留，V3 前端已隐藏用户文案 | P2 | 否 | 不删除，前端已处理 | Local Agent / Playwright 链路稳定后专项删除 |
+| settings.json 上云 | 网点/员工/密码仍在本地配置文件 | P3 | 否 | 不迁移 | 等 Local Agent 设计明确后处理 |
+| PG sites 同步 | best-effort，失败不阻塞设置保存 | 信息 | 否 | 不处理 | 执行链路直接读 settings.json，不受影响 |
 
 ## 3. 失败测试详情
 
@@ -50,7 +55,13 @@ npm test 全量 59 tests，55 passed，4 failed。
 
 ## 5. 处理建议
 
-- 当前阶段不修复，不阻塞 Phase 3-B 验收
+- 当前阶段不修复，不阻塞 Phase 3 验收
 - 后续如需恢复 fallback 测试：
   1. 在 `credentials.ts` 中补充刘磊、肖飞等真实员工的凭据数据
   2. 或修改测试用例，mock `findCredential` 函数返回模拟数据
+
+## 6. Phase 3 相关文档
+
+- [Phase 3 总体验收报告](V3_PHASE3_ACCEPTANCE_REPORT.md)
+- [Phase 3 交接文档](V3_PHASE3_HANDOFF.md)
+- [Phase 3-A Cloud Auth Boundary](V3_PHASE3A_CLOUD_AUTH_BOUNDARY.md)
