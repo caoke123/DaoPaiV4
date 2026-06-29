@@ -45,6 +45,7 @@ import { EasyBRClient } from './easybr/EasyBRClient';
 import { router } from './api/routes';
 import { requestContext } from './api/middleware/requestContext';
 import { authMiddleware } from './auth';
+import { authRouter } from './auth/authRoutes';
 import { windowRuntimeRouter } from './api/windowRuntimeRoutes';
 import { pocRouter, PlaywrightRuntime } from './playwright-runtime';
 import { pocAdapterRouter, adapterTestRouter } from './window-adapter';
@@ -237,6 +238,7 @@ async function main(): Promise<void> {
   app.use(requestContext);
 
   // 注册 API 路由
+  app.use(authRouter);   // Phase 3-B: Auth 路由（必须在 authMiddleware 之后）
   app.use(router);
 
   // Phase 4-B: Window Runtime 适配路由（runtimeMode 感知 + playwright 窗口状态/启动）
@@ -314,7 +316,10 @@ async function main(): Promise<void> {
         const wsReady = await pg.ensureDefaultWorkstation();
         console.log(`[启动] 默认工作站 ws-local-default ${wsReady ? '已就绪' : '未找到（请检查 migration 002）'}`);
 
-        // 5. Phase 2-C-1: 僵尸任务恢复（PG 已就绪，优先写 PG）
+        // 5. Phase 3-B: 创建默认超级管理员（幂等，首次启动时创建）
+        await pg.createBootstrapAdminIfMissing();
+
+        // 6. Phase 2-C-1: 僵尸任务恢复（PG 已就绪，优先写 PG）
         const recovered = await AssignmentEngine.recoverRunningTasks();
         if (recovered > 0) {
           console.log(`[启动] 僵尸任务恢复完成: ${recovered} 个任务 running → failed`);

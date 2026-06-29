@@ -1,6 +1,8 @@
 // Phase 2-E: 请求上下文中间件
 // 为每个 API 请求注入 tenantId / workstationId / requestId
-// 当前默认值来自 Phase 2-B / 2-D 常量，后续从 JWT / Agent Token 解析
+// 当前默认值来自 Phase 2-B / 2-D 常量
+//
+// Phase 3-B: 如果 req.principal.type === 'user'，则从 principal.tenantId 注入真实 tenantId
 
 import type { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
@@ -9,17 +11,19 @@ import { DEFAULT_TENANT_ID, DEFAULT_WORKSTATION_ID } from '../../db/PgDatabase';
 /**
  * 请求上下文中间件
  *
- * 在业务路由之前挂载，为每个请求注入：
- *   - req.tenantId:      租户标识（默认 tenant-default）
- *   - req.workstationId: 工作站标识（默认 ws-local-default）
- *   - req.requestId:     请求追踪 ID（UUID，便于日志关联）
- *
- * 未来扩展点：
- *   - 从 Authorization header 解析 JWT → tenantId
- *   - 从 X-Agent-Token header 解析 Agent Token → workstationId
+ * 注入逻辑：
+ *   - req.tenantId:      user principal → principal.tenantId；anonymous → DEFAULT_TENANT_ID
+ *   - req.workstationId: 当前固定 DEFAULT_WORKSTATION_ID（后续从 Agent principal 注入）
+ *   - req.requestId:     UUID 追踪
  */
 export function requestContext(req: Request, _res: Response, next: NextFunction): void {
-  req.tenantId = DEFAULT_TENANT_ID;
+  // Phase 3-B: 从 UserPrincipal 获取真实 tenantId
+  if (req.principal && req.principal.type === 'user') {
+    req.tenantId = req.principal.tenantId;
+  } else {
+    req.tenantId = DEFAULT_TENANT_ID;
+  }
+
   req.workstationId = DEFAULT_WORKSTATION_ID;
   req.requestId = randomUUID();
   next();

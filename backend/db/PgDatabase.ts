@@ -1344,6 +1344,139 @@ export class PgDatabase {
     };
   }
 
+  // ══════════════════════════════════════════════════════════
+  // 11. users / auth（Phase 3-B）
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 创建默认超级管理员（幂等，启动时调用一次）
+   * 用户名和密码从环境变量读取，不硬编码。
+   */
+  async createBootstrapAdminIfMissing(): Promise<boolean> {
+    const username = process.env.BOOTSTRAP_ADMIN_USERNAME;
+    const password = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+    if (!username || !password) {
+      console.warn('[PG] BOOTSTRAP_ADMIN_USERNAME 或 BOOTSTRAP_ADMIN_PASSWORD 未设置，跳过默认管理员创建');
+      return false;
+    }
+
+    // 检查是否已存在
+    const existing = await this.pool.query(
+      `SELECT id FROM users WHERE tenant_id = $1 AND username = $2`,
+      [DEFAULT_TENANT_ID, username]
+    );
+    if (existing.rows.length > 0) {
+      return true; // 已存在，无需创建
+    }
+
+    // 动态导入密码模块（避免循环依赖）
+    const { hashPassword } = await import('../auth/password');
+    const passwordHash = await hashPassword(password);
+
+    await this.pool.query(
+      `INSERT INTO users (tenant_id, username, password_hash, role, status)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [DEFAULT_TENANT_ID, username, passwordHash, 'super_admin', 'active']
+    );
+    console.log(`[PG] 默认超级管理员已创建: ${username}`);
+    return true;
+  }
+
+  /** 按租户和用户名查询用户 */
+  async getUserByUsername(tenantId: string, username: string): Promise<{
+    id: string;
+    tenantId: string;
+    username: string;
+    passwordHash: string;
+    role: string;
+    status: string;
+  } | null> {
+    const result = await this.pool.query(
+      `SELECT id, tenant_id, username, password_hash, role, status
+       FROM users WHERE tenant_id = $1 AND username = $2`,
+      [tenantId, username]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0] as any;
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      username: row.username,
+      passwordHash: row.password_hash,
+      role: row.role,
+      status: row.status,
+    };
+  }
+
+  /** 按 ID 查询用户 */
+  async getUserById(tenantId: string, userId: string): Promise<{
+    id: string;
+    tenantId: string;
+    username: string;
+    role: string;
+    status: string;
+  } | null> {
+    const result = await this.pool.query(
+      `SELECT id, tenant_id, username, role, status
+       FROM users WHERE id = $1 AND tenant_id = $2`,
+      [userId, tenantId]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0] as any;
+    return {
+      id: row.id,
+      tenantId: row.tenant_id,
+      username: row.username,
+      role: row.role,
+      status: row.status,
+    };
+  }
+
+  /** 插入 Refresh Token hash */
+  async insertRefreshToken(
+    userId: string,
+    tenantId: string,
+    tokenHash: string,
+    expiresAt: Date
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO refresh_tokens (user_id, tenant_id, token_hash, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [userId, tenantId, tokenHash, expiresAt]
+    );
+  }
+
+  /** 查找 Refresh Token（未撤销、未过期） */
+  async findRefreshToken(tokenHash: string): Promise<{
+    id: string;
+    userId: string;
+    tenantId: string;
+    expiresAt: Date;
+  } | null> {
+    const result = await this.pool.query(
+      `SELECT id, user_id, tenant_id, expires_at
+       FROM refresh_tokens
+       WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > NOW()`,
+      [tokenHash]
+    );
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0] as any;
+    return {
+      id: row.id,
+      userId: row.user_id,
+      tenantId: row.tenant_id,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  /** 撤销 Refresh Token */
+  async revokeRefreshToken(tokenHash: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1`,
+      [tokenHash]
+    );
+  }
+
   /** 释放连接池（在应用停机时调用） */
   async close(): Promise<void> {
     await this.pool.end();
