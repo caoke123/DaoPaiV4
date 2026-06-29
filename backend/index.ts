@@ -44,6 +44,7 @@ import { AssignmentEngine } from './modules/assignment-engine/AssignmentEngine';
 import { EasyBRClient } from './easybr/EasyBRClient';
 import { router } from './api/routes';
 import { requestContext } from './api/middleware/requestContext';
+import { authMiddleware } from './auth';
 import { windowRuntimeRouter } from './api/windowRuntimeRoutes';
 import { pocRouter, PlaywrightRuntime } from './playwright-runtime';
 import { pocAdapterRouter, adapterTestRouter } from './window-adapter';
@@ -226,6 +227,10 @@ async function main(): Promise<void> {
 
   // Phase H: 优雅停机中间件（必须在业务路由之前，但健康检查白名单放行）
   app.use(shutdownGuard);
+
+  // Phase 3-A: 认证中间件（当前占位 — 注入 anonymous principal）
+  // 未来此处解析 JWT / Agent Token → 注入真实 principal → 更新 req.tenantId/workstationId
+  app.use(authMiddleware);
 
   // Phase 2-E: 请求上下文中间件（注入 req.tenantId / req.workstationId / req.requestId）
   // 当前默认值：tenant-default / ws-local-default，后续从 JWT / Agent Token 解析

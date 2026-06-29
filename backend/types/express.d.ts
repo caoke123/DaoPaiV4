@@ -2,6 +2,7 @@
 // 由 requestContext 中间件在业务路由之前注入，后续 JWT / Agent 鉴权替换此处默认值
 
 import type { Request } from 'express';
+import type { Principal } from '../auth/types';
 
 declare global {
   namespace Express {
@@ -12,6 +13,8 @@ declare global {
       workstationId: string;
       /** 请求追踪 ID，用于日志关联 */
       requestId?: string;
+      /** Phase 3-A: 认证身份（user / agent / anonymous），由 authMiddleware 注入 */
+      principal?: Principal;
     }
   }
 }
