@@ -124,7 +124,7 @@ workstation 是 Cloud 管理执行设备的单位，不等于用户。
 |------|------|------|
 | `id` | UUID | 主键 |
 | `tenant_id` | VARCHAR | 所属租户 |
-| `site_id` | VARCHAR | 所属站点（必填） |
+| `site_id` | VARCHAR | 所属站点（可空，允许先注册工作站、后绑定站点） |
 | `name` | VARCHAR | 工作站名称（如"天南大-前台01"） |
 | `status` | VARCHAR | 授权状态：`active` / `disabled` |
 | `online_status` | VARCHAR | 在线状态：`online` / `offline` / `error` |
@@ -147,7 +147,7 @@ tenant（租户）
 ```
 
 - 一个租户可以有多个 workstation
-- 一个 workstation 必须绑定一个主要站点
+- 一个 workstation 可以绑定一个主要站点（可选，site_id 可空）
 - workstation 不等于用户，它是设备
 - workstation 用 Agent Token 鉴权，不用用户 JWT
 
@@ -324,7 +324,7 @@ Cloud 标记任务 done，写入 waybill_results 表
 pending    → 待领取（Cloud 创建任务后的初始状态）
 assigned   → 已分配（Agent 拉取后，Cloud 原子分配）
 running    → 执行中（Agent 确认开始执行）
-succeeded  → 执行成功（Agent 回传结果）
+done       → 执行成功（Agent 回传结果）
 failed     → 执行失败（Agent 上报错误）
 timeout    → 执行超时（Cloud 检测超时，等待人工处理）
 cancelled  → 已取消（用户在 Cloud 取消）
@@ -436,7 +436,7 @@ cancelled  → 已取消（用户在 Cloud 取消）
 
 | 删除项 | 位置 |
 |--------|------|
-| EasyBRClient 类 | backend/browser/ |
+| EasyBRClient 类 | backend/easybr/EasyBRClient.ts |
 | `/api/easybr/*` 路由 | backend/api/routes.ts |
 | `legacy_easybr` 模式 | backend/browser/ 相关代码 |
 | `easybr*` 字段命名 | settings.json、数据库、代码 |
