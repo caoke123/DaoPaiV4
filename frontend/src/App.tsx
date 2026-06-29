@@ -23,28 +23,37 @@ function AuthFailureHandler() {
   return null;
 }
 
-export default function App() {
+/** 业务页面布局（含 Provider 包装） */
+function BusinessLayout() {
   return (
     <WindowStateProvider>
       <RuntimeModeProvider>
         <TaskExecutionProvider>
-          <AuthFailureHandler />
-          <Routes>
-            {/* 登录页（独立布局，无 Header/Sidebar） */}
-            <Route path="/login" element={<LoginPage />} />
-            {/* 业务页面（AppShell 布局） */}
-            <Route element={<AppShell />}>
-              <Route path="/" element={<Navigate to="/arrival" replace />} />
-              <Route path="/arrival" element={<ArrivalPage />} />
-              <Route path="/dispatch" element={<DispatchPage />} />
-              <Route path="/integrated" element={<IntegratedPage />} />
-              <Route path="/sign" element={<SignPage />} />
-              <Route path="/tasks" element={<TasksPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Route>
-          </Routes>
+          <AppShell />
         </TaskExecutionProvider>
       </RuntimeModeProvider>
     </WindowStateProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <>
+      <AuthFailureHandler />
+      <Routes>
+        {/* 登录页（独立布局，无 Header/Sidebar，不挂载 Provider） */}
+        <Route path="/login" element={<LoginPage />} />
+        {/* 业务页面（AppShell 布局 + Provider） */}
+        <Route element={<BusinessLayout />}>
+          <Route path="/" element={<Navigate to="/arrival" replace />} />
+          <Route path="/arrival" element={<ArrivalPage />} />
+          <Route path="/dispatch" element={<DispatchPage />} />
+          <Route path="/integrated" element={<IntegratedPage />} />
+          <Route path="/sign" element={<SignPage />} />
+          <Route path="/tasks" element={<TasksPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+        </Route>
+      </Routes>
+    </>
   );
 }

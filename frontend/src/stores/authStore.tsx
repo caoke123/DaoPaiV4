@@ -62,6 +62,19 @@ function clearTokens() {
   localStorage.removeItem(LS_USER);
 }
 
+// ── 安全 JSON 解析（Phase 3-D-1-A）──
+// 防止后端返回空 body 或非 JSON 时 response.json() 直接抛异常
+
+async function parseJsonSafely(resp: Response): Promise<Record<string, unknown> | null> {
+  const text = await resp.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // ── Context ──
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -89,13 +102,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetch('/api/auth/me', {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
-      .then(res => {
+      .then(async res => {
         if (!res.ok) throw new Error('token invalid');
-        return res.json();
+        const data = await parseJsonSafely(res);
+        if (!data) throw new Error('empty response');
+        return data;
       })
-      .then((data: AuthUser) => {
+      .then((data) => {
         setState({
-          user: { id: data.id, tenantId: data.tenantId, role: data.role, username: data.username || '' },
+          user: { id: (data as any).id as string, tenantId: (data as any).tenantId as string, role: (data as any).role as string, username: ((data as any).username || '') as string },
           accessToken,
           refreshToken,
           isAuthenticated: true,
@@ -116,26 +131,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (username: string, password: string) => {
-    const resp = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-    const data = await resp.json();
+    let resp: Response;
+    try {
+      resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+    } catch {
+      throw new Error('网络异常，请确认后端服务已启动');
+    }
+    const data = await parseJsonSafely(resp);
     if (!resp.ok) {
-      throw new Error(data.error || '登录失败');
+      throw new Error((data as any)?.error || '登录失败，请检查后端服务或接口响应');
+    }
+    if (!data || !data.accessToken || !data.user) {
+      throw new Error('登录失败，请检查后端服务或接口响应');
     }
     const user: AuthUser = {
-      id: data.user.id,
-      tenantId: data.user.tenantId,
-      role: data.user.role,
-      username: data.user.username,
+      id: (data.user as any).id,
+      tenantId: (data.user as any).tenantId,
+      role: (data.user as any).role,
+      username: (data.user as any).username,
     };
-    saveTokens(data.accessToken, data.refreshToken, user);
+    saveTokens(data.accessToken as string, data.refreshToken as string, user);
     setState({
       user,
-      accessToken: data.accessToken,
-      refreshToken: data.refreshToken,
+      accessToken: data.accessToken as string,
+      refreshToken: data.refreshToken as string,
       isAuthenticated: true,
       isLoading: false,
     });
@@ -162,6 +185,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: false,
       isLoading: false,
     });
+    // Phase 3-D-1-A: 退出后跳转到登录页
+    window.location.href = '/login';
   }, []);
 
   const refresh = useCallback(async (): Promise<string | null> => {
@@ -178,8 +203,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setState(s => ({ ...s, isAuthenticated: false, accessToken: null, refreshToken: null, user: null }));
         return null;
       }
-      const data = await resp.json();
-      const newAccessToken = data.accessToken;
+      const data = await parseJsonSafely(resp);
+      if (!data || !data.accessToken) return null;
+      const newAccessToken = data.accessToken as string;
       // 更新 localStorage
       localStorage.setItem(LS_ACCESS_TOKEN, newAccessToken);
       setState(s => ({ ...s, accessToken: newAccessToken }));
@@ -200,10 +226,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!resp.ok) throw new Error('not authenticated');
-      const data: AuthUser = await resp.json();
+      const data = await parseJsonSafely(resp);
+      if (!data) throw new Error('empty response');
       setState(s => ({
         ...s,
-        user: { id: data.id, tenantId: data.tenantId, role: data.role, username: data.username || '' },
+        user: { id: (data as any).id as string, tenantId: (data as any).tenantId as string, role: (data as any).role as string, username: ((data as any).username || '') as string },
         isAuthenticated: true,
         isLoading: false,
       }));

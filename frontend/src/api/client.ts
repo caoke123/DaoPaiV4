@@ -9,6 +9,18 @@
 
 import { getAccessToken, getRefreshToken, setAccessToken, clearAllTokens, triggerAuthFailure } from '../stores/authStore';
 
+// ── 安全 JSON 解析（Phase 3-D-1-A）──
+
+async function parseJsonSafely(resp: Response): Promise<Record<string, unknown> | null> {
+  const text = await resp.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // ── fetchWithAuth: 自动携带 Bearer token + 401 自动 refresh ──
 
 let isRefreshing = false;
@@ -30,9 +42,10 @@ async function refreshAccessToken(): Promise<string | null> {
         clearAllTokens();
         return null;
       }
-      const data = await resp.json();
-      setAccessToken(data.accessToken);
-      return data.accessToken;
+      const data = await parseJsonSafely(resp);
+      if (!data || !data.accessToken) return null;
+      setAccessToken(data.accessToken as string);
+      return data.accessToken as string;
     } catch {
       return null;
     } finally {
