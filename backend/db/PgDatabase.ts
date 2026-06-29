@@ -1,0 +1,1209 @@
+/**
+ * PgDatabase — PostgreSQL 数据库访问层
+ *
+ * 数据库换代核心模块。使用 pg.Pool 连接池，手写 SQL 保持对查询的绝对掌控。
+ * 初期与现有 Database.ts 并存，验证通过后逐步替换，绝不破坏 AssignmentEngine 运行。
+ *
+ * 核心能力：
+ *   1. 幂等初始化 — 读取并执行 init-schema.sql（CREATE IF NOT EXISTS）
+ *   2. 批量插入运单结果 — 万单级写入性能（一条 SQL 多行 VALUES）
+ *   3. 运单池 UPERT — INSERT ... ON CONFLICT DO UPDATE（对账基石）
+ *   4. 参数化查询 — 全部使用 $1, $2 防注入
+ *
+ * 环境变量（全部可选，有默认值）：
+ *   PG_HOST     — 默认 127.0.0.1
+ *   PG_PORT     — 默认 5436（DaoPai V3 专属，与 V2 5435 隔离）
+ *   PG_USER     — 默认 daopai（与生产 bnsy 隔离）
+ *   PG_PASSWORD — 默认 daopai_secret（与生产 bnsy_secret 隔离）
+ *   PG_DATABASE — 默认 daopai_v3（与 V2 daopai_next 隔离）
+ *   PG_POOL_MAX — 连接池上限，默认 20
+ */
+
+import path from 'path';
+import fs from 'fs';
+import { Pool, type PoolClient, type QueryResult } from 'pg';
+import type { WaybillResult, TaskLogEntry } from '../types/api-contracts';
+
+// ── 连接配置 ──────────────────────────────────────────
+
+export interface PgConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+  max: number; // 连接池上限
+}
+
+function loadConfig(): PgConfig {
+  return {
+    host: process.env.PG_HOST || '127.0.0.1',
+    port: parseInt(process.env.PG_PORT || '5436', 10),
+    user: process.env.PG_USER || 'daopai',
+    password: process.env.PG_PASSWORD || 'daopai_secret',
+    database: process.env.PG_DATABASE || 'daopai_v3',
+    max: parseInt(process.env.PG_POOL_MAX || '20', 10),
+  };
+}
+
+// ── 任务插入参数类型 ──────────────────────────────────
+
+export interface InsertTaskParams {
+  id?: string;
+  type: string;
+  siteId: string;
+  status?: string;
+  totalCount: number;
+  doneCount?: number;
+  failCount?: number;
+  inputData?: Record<string, unknown>;
+}
+
+// ── PgDatabase 类 ─────────────────────────────────────
+
+export class PgDatabase {
+  private static instance: PgDatabase | null = null;
+
+  private pool: Pool;
+  private initialized = false;
+
+  private constructor(config?: Partial<PgConfig>) {
+    const cfg = { ...loadConfig(), ...config };
+    // 启动日志：打印连接目标（不打印密码）
+    console.log(`[PG] host=${cfg.host} port=${cfg.port} database=${cfg.database} user=${cfg.user}`);
+    this.pool = new Pool({
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      password: cfg.password,
+      database: cfg.database,
+      max: cfg.max,
+      // 连接超时 5 秒
+      connectionTimeoutMillis: 5000,
+      // 空闲连接 30 秒后回收
+      idleTimeoutMillis: 30000,
+    });
+
+    // Pool 级错误处理：防止未捕获的错误导致进程崩溃
+    this.pool.on('error', (err: Error) => {
+      console.error('[PgDatabase] Pool 意外错误:', err.message);
+    });
+  }
+
+  /** 获取单例 */
+  static getInstance(config?: Partial<PgConfig>): PgDatabase {
+    if (!PgDatabase.instance) {
+      PgDatabase.instance = new PgDatabase(config);
+    }
+    return PgDatabase.instance;
+  }
+
+  /** 获取底层 Pool（供高级查询使用） */
+  getPool(): Pool {
+    return this.pool;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 1. init() — 幂等初始化
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 初始化数据库：读取并执行 init-schema.sql
+   *
+   * 使用 CREATE TABLE IF NOT EXISTS 实现幂等：
+   * 多次调用 init() 不会报错，只会创建缺失的表。
+   * Docker 环境：PostgreSQL 容器启动时会自动执行
+   *   /docker-entrypoint-initdb.d/01-init-schema.sql，
+   *   但仍然显式调用 init() 以确保非 Docker 环境也能建表。
+   */
+  async init(): Promise<void> {
+    if (this.initialized) return;
+
+    // 1. 测试连接
+    const client = await this.pool.connect();
+    try {
+      await client.query('SELECT 1');
+    } finally {
+      client.release();
+    }
+
+    // 2. 读取 schema 文件
+    const schemaPaths = [
+      // bnsy-operator-next: schema 文件位于 database/schema/
+      path.join(process.cwd(), 'database', 'schema', 'init-schema.sql'),
+      path.join(process.cwd(), '..', 'database', 'schema', 'init-schema.sql'),
+    ];
+
+    let sql = '';
+    for (const schemaPath of schemaPaths) {
+      if (fs.existsSync(schemaPath)) {
+        sql = fs.readFileSync(schemaPath, 'utf8');
+        console.log(`[PgDatabase] init: 读取 schema 文件 ${schemaPath}`);
+        break;
+      }
+    }
+
+    if (!sql) {
+      console.warn('[PgDatabase] init: 未找到 init-schema.sql，跳过建表。请确认 database/schema/init-schema.sql 存在。');
+      this.initialized = true;
+      return;
+    }
+
+    // 3. 执行 schema（一次事务）
+    await this.pool.query(sql);
+    console.log('[PgDatabase] init: schema 初始化完成');
+    this.initialized = true;
+  }
+
+  /** 检查连接是否存活 */
+  async healthCheck(): Promise<{ ok: boolean; message: string }> {
+    try {
+      const result = await this.pool.query('SELECT NOW() AS now, version() AS version');
+      const row = result.rows[0];
+      return {
+        ok: true,
+        message: `PostgreSQL ${(row as any).version} | 服务器时间: ${(row as any).now}`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: `连接失败: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2. insertTask() — 插入新任务
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 插入新任务
+   *
+   * 如果 task.id 已提供（由 routes.ts 预先生成），则直接使用；
+   * 否则由 PG 的 gen_random_uuid() 自动生成。
+   *
+   * @param task  任务参数
+   * @returns 任务的 UUID
+   */
+  async insertTask(task: InsertTaskParams): Promise<string> {
+    const hasId = !!task.id;
+    const result = await this.pool.query<{ id: string }>(
+      hasId
+        ? `INSERT INTO tasks (id, type, site_id, status, total_count, done_count, fail_count, input_data)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id`
+        : `INSERT INTO tasks (type, site_id, status, total_count, done_count, fail_count, input_data)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id`,
+      hasId
+        ? [
+            task.id,
+            task.type,
+            task.siteId,
+            task.status || 'pending',
+            task.totalCount,
+            task.doneCount || 0,
+            task.failCount || 0,
+            task.inputData ? JSON.stringify(task.inputData) : null,
+          ]
+        : [
+            task.type,
+            task.siteId,
+            task.status || 'pending',
+            task.totalCount,
+            task.doneCount || 0,
+            task.failCount || 0,
+            task.inputData ? JSON.stringify(task.inputData) : null,
+          ]
+    );
+
+    return result.rows[0].id;
+  }
+
+  /**
+   * 更新任务终态（done / failed / cancelled）
+   *
+   * @param taskId   任务 ID
+   * @param updates  要更新的字段
+   */
+  async updateTaskStatus(
+    taskId: string,
+    updates: { status: string; doneCount?: number; failCount?: number; finishedAt?: string }
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE tasks
+       SET status     = $2,
+           done_count = COALESCE($3, done_count),
+           fail_count = COALESCE($4, fail_count),
+           finished_at = COALESCE($5, finished_at)
+       WHERE id = $1`,
+      [
+        taskId,
+        updates.status,
+        updates.doneCount ?? null,
+        updates.failCount ?? null,
+        updates.finishedAt ?? null,
+      ]
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2b. getTaskList() — 分页查询任务列表
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 分页查询任务列表，支持按 type 过滤、按关键字搜索、含员工数统计
+   *
+   * 排序：created_at DESC（最新任务在前）
+   * 搜索：支持任务类型中文名、员工名、运单号（ILIKE 模糊匹配）
+   *
+   * @param page    页码（从 1 开始）
+   * @param limit   每页数量
+   * @param type    可选任务类型过滤
+   * @param search  可选关键字搜索（任务类型中文/员工名/运单号）
+   * @returns { tasks, total }
+   */
+  async getTaskList(
+    page: number,
+    limit: number,
+    type?: string,
+    status?: string,
+    search?: string,
+  ): Promise<{
+    tasks: Array<{
+      id: string;
+      type: string;
+      site: string;
+      siteName: string;
+      status: string;
+      totalCount: number;
+      doneCount: number;
+      failCount: number;
+      inputData?: string;
+      createdAt: string;
+      finishedAt: string | null;
+      staffCount: number;
+    }>;
+    total: number;
+  }> {
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const countConditions: string[] = [];
+    const params: unknown[] = [];
+    const countParams: unknown[] = [];
+
+    let paramIdx = 1;
+
+    if (type) {
+      conditions.push(`t.type = $${paramIdx}`);
+      params.push(type);
+      countConditions.push(`t.type = $${paramIdx}`);
+      countParams.push(type);
+      paramIdx++;
+    }
+
+    if (status) {
+      conditions.push(`t.status = $${paramIdx}`);
+      params.push(status);
+      countConditions.push(`t.status = $${paramIdx}`);
+      countParams.push(status);
+      paramIdx++;
+    }
+
+    // ── 搜索条件：搜索任务类型中文名映射 ──
+    const typeKeywordMap: Record<string, string> = {
+      '到件': 'arrive', '到件扫描': 'arrive',
+      '派件': 'dispatch', '派件扫描': 'dispatch',
+      '签收': 'sign', '签收录入': 'sign',
+      '集成': 'integrated', '综合': 'integrated',
+      '窗口': 'init_window', '初始化': 'init_window',
+    };
+
+    if (search) {
+      const matchedType = typeKeywordMap[search];
+
+      if (matchedType) {
+        // 精确匹配到任务类型 → 按类型过滤
+        conditions.push(`t.type = $${paramIdx}`);
+        params.push(matchedType);
+        countConditions.push(`t.type = $${paramIdx}`);
+        countParams.push(matchedType);
+        paramIdx++;
+      } else {
+        // 未匹配到类型 → 搜索员工名 + 运单号（ILIKE 模糊）
+        const searchParam = `%${search}%`;
+        conditions.push(`(
+          t.id IN (SELECT DISTINCT wr.task_id FROM waybill_results wr WHERE wr.staff_name ILIKE $${paramIdx})
+          OR t.id IN (SELECT DISTINCT wr2.task_id FROM waybill_results wr2 WHERE wr2.waybill_no ILIKE $${paramIdx})
+        )`);
+        params.push(searchParam);
+        countConditions.push(`(
+          t.id IN (SELECT DISTINCT wr.task_id FROM waybill_results wr WHERE wr.staff_name ILIKE $${paramIdx})
+          OR t.id IN (SELECT DISTINCT wr2.task_id FROM waybill_results wr2 WHERE wr2.waybill_no ILIKE $${paramIdx})
+        )`);
+        countParams.push(searchParam);
+        paramIdx++;
+      }
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const countWhere = countConditions.length > 0 ? `WHERE ${countConditions.join(' AND ')}` : '';
+    const limitIdx = paramIdx;
+    const offsetIdx = paramIdx + 1;
+    params.push(limit, offset);
+    // countParams 仅含查询条件参数，不包含 limit/offset
+    // （SELECT COUNT(*) 无需分页参数）
+
+    const [dataResult, countResult] = await Promise.all([
+      this.pool.query(
+        `SELECT t.id, t.type, t.site_id, s.name AS site_name, t.status, t.total_count, t.done_count, t.fail_count, t.input_data, t.created_at, t.finished_at,
+                COALESCE(ws.staff_cnt, 0) AS staff_count
+         FROM tasks t
+         LEFT JOIN sites s ON s.id = t.site_id
+         LEFT JOIN (
+           SELECT task_id, COUNT(DISTINCT staff_name)::int AS staff_cnt
+           FROM waybill_results
+           WHERE staff_name IS NOT NULL AND staff_name != ''
+           GROUP BY task_id
+         ) ws ON ws.task_id = t.id
+         ${whereClause}
+         ORDER BY t.created_at DESC
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+        params
+      ),
+      this.pool.query<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM tasks t ${countWhere}`,
+        countParams
+      ),
+    ]);
+
+    const tasks = dataResult.rows.map((row: any) => ({
+      id: row.id,
+      type: row.type,
+      site: row.site_id,
+      siteName: row.site_name || row.site_id,
+      status: row.status,
+      totalCount: row.total_count,
+      doneCount: row.done_count,
+      failCount: row.fail_count,
+      inputData: row.input_data,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      finishedAt: row.finished_at
+        ? (row.finished_at instanceof Date ? row.finished_at.toISOString() : String(row.finished_at))
+        : null,
+      staffCount: row.staff_count,
+    }));
+
+    return { tasks, total: parseInt(countResult.rows[0].cnt, 10) };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2b2. getTaskStats() — 服务端聚合统计
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 获取任务聚合统计（服务端 COUNT，100% 准确）
+   *
+   * @returns 按 status 分组的数量
+   */
+  async getTaskStats(): Promise<{
+    total: number;
+    running: number;
+    done: number;
+    failed: number;
+    cancelled: number;
+    pending: number;
+  }> {
+    const result = await this.pool.query<{ status: string; cnt: string }>(
+      `SELECT status, COUNT(*)::text AS cnt FROM tasks GROUP BY status`
+    );
+
+    const map: Record<string, number> = {};
+    for (const row of result.rows) {
+      map[row.status] = parseInt(row.cnt, 10);
+    }
+
+    return {
+      total: Object.values(map).reduce((a, b) => a + b, 0),
+      running: map.running || 0,
+      done: map.done || 0,
+      failed: map.failed || 0,
+      cancelled: map.cancelled || 0,
+      pending: map.pending || 0,
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2c. getTaskById() — 按 ID 查询单个任务
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 按 ID 查询单个任务
+   *
+   * @param taskId  任务 ID
+   * @returns 任务对象或 null
+   */
+  async getTaskById(taskId: string): Promise<{
+    id: string;
+    type: string;
+    site: string;
+    siteName: string;
+    status: string;
+    totalCount: number;
+    doneCount: number;
+    failCount: number;
+    createdAt: string;
+    finishedAt: string | null;
+    inputData?: unknown;
+  } | null> {
+    const result = await this.pool.query(
+      `SELECT t.id, t.type, t.site_id, s.name AS site_name, t.status, t.total_count, t.done_count, t.fail_count, t.created_at, t.finished_at, t.input_data
+       FROM tasks t
+       LEFT JOIN sites s ON s.id = t.site_id
+       WHERE t.id = $1`,
+      [taskId]
+    );
+
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0] as any;
+    return {
+      id: row.id,
+      type: row.type,
+      site: row.site_id,
+      siteName: row.site_name || row.site_id,
+      status: row.status,
+      totalCount: row.total_count,
+      doneCount: row.done_count,
+      failCount: row.fail_count,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      finishedAt: row.finished_at
+        ? (row.finished_at instanceof Date ? row.finished_at.toISOString() : String(row.finished_at))
+        : null,
+      inputData: row.input_data,
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2c. syncSitesFromSettings() — 将设置中心的网点 id/name 同步到 PG sites 表
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 将站点名（中文）转换为站点 code（与 routes.ts normalizeSiteToCode / windowRuntimeRoutes.ts
+   * normalizeSiteNameToCode 逻辑一致）。
+   *
+   * Phase 4-C: 必须与所有调用方保持完全一致，否则 PG tasks.site_id 外键会因 id 格式不匹配
+   * 而违反约束（INSERT 失败被 fire-and-forget .catch 静默吞掉，导致任务中心永远为空）。
+   */
+  private siteNameToCode(siteName: string): string | null {
+    if (!siteName) return null;
+    if (siteName.includes('天南大')) return 'tiannanda';
+    if (siteName.includes('和苑')) return 'heyuan';
+    return null;
+  }
+
+  /**
+   * 根据设置中心传入的 sites 配置，UPSERT PG sites 表的 id/name。
+   *
+   * Phase 4-C 修复：同时写入两条记录，确保外键 tasks.site_id REFERENCES sites(id) 总能满足：
+   *   1. settings.json 的原始 site.id（如 'site-1782121346155'）
+   *      — 兼容直接使用 settings.json id 的代码路径
+   *   2. normalizeSiteToCode 转换后的 siteCode（如 'tiannanda' / 'heyuan'）
+   *      — AssignmentEngine.pgDb.insertTask 实际使用的 siteId 格式
+   *
+   * 这样无论 insertTask 用哪种格式作为 site_id，FK 都能命中 sites 表，
+   * 避免外键违反导致任务被静默丢弃、任务中心永远为空的问题。
+   *
+   * @param sites 设置中心格式的网点配置（含 id/name/windows）
+   */
+  async syncSitesFromSettings(sites: Array<{ id: string; name: string }>): Promise<void> {
+    if (!Array.isArray(sites) || sites.length === 0) return;
+    for (const s of sites) {
+      if (!s?.id) continue;
+      const displayName = s.name || s.id;
+
+      // 1. 写入 settings.json 原始 id（兼容直接使用 settings.json id 的代码路径）
+      await this.pool.query(
+        `INSERT INTO sites (id, name) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
+        [s.id, displayName]
+      );
+
+      // 2. 写入 siteCode（与 normalizeSiteToCode 一致）—— insertTask 实际使用的 site_id 格式
+      //    这是 Phase 4-C 修复的核心：tasks.site_id FK 必须命中此记录
+      const siteCode = this.siteNameToCode(displayName);
+      if (siteCode && siteCode !== s.id) {
+        await this.pool.query(
+          `INSERT INTO sites (id, name) VALUES ($1, $2)
+           ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, updated_at = NOW()`,
+          [siteCode, displayName]
+        );
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2d. cleanupOldTasks() — 清理历史已结束任务
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 清理指定天数前的已结束任务（done / failed / cancelled）
+   * 禁止删除 running / pending
+   *
+   * @param retentionDays 保留天数，默认 30；传 -1 表示永久保留（不清理）
+   * @returns 删除量统计
+   */
+  async cleanupOldTasks(retentionDays: number = 30): Promise<{
+    deletedTasks: number;
+    deletedWaybills: number;
+    deletedLogs: number;
+  }> {
+    if (retentionDays <= 0) {
+      return { deletedTasks: 0, deletedWaybills: 0, deletedLogs: 0 };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 先统计
+      const targetResult = await client.query<{ task_id: string }>(
+        `SELECT id AS task_id FROM tasks
+         WHERE status IN ('done', 'failed', 'cancelled')
+           AND created_at < NOW() - ($1 || ' days')::INTERVAL`,
+        [String(retentionDays)]
+      );
+      const taskIds = targetResult.rows.map(r => r.task_id);
+
+      if (taskIds.length === 0) {
+        await client.query('COMMIT');
+        return { deletedTasks: 0, deletedWaybills: 0, deletedLogs: 0 };
+      }
+
+      // task_logs + waybill_results 有 ON DELETE CASCADE，但显式删除更安全
+      const logResult = await client.query<{ deleted_count: string }>(
+        `WITH deleted AS (
+           DELETE FROM task_logs WHERE task_id = ANY($1::uuid[]) RETURNING 1
+         ) SELECT COUNT(*)::text AS deleted_count FROM deleted`,
+        [taskIds]
+      );
+
+      const wrResult = await client.query<{ deleted_count: string }>(
+        `WITH deleted AS (
+           DELETE FROM waybill_results WHERE task_id = ANY($1::uuid[]) RETURNING 1
+         ) SELECT COUNT(*)::text AS deleted_count FROM deleted`,
+        [taskIds]
+      );
+
+      const taskResult = await client.query<{ deleted_count: string }>(
+        `WITH deleted AS (
+           DELETE FROM tasks WHERE id = ANY($1::uuid[]) RETURNING 1
+         ) SELECT COUNT(*)::text AS deleted_count FROM deleted`,
+        [taskIds]
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        deletedTasks: parseInt(taskResult.rows[0].deleted_count, 10),
+        deletedWaybills: parseInt(wrResult.rows[0].deleted_count, 10),
+        deletedLogs: parseInt(logResult.rows[0].deleted_count, 10),
+      };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2e. countTaskDeleteStats() — 统计选中任务关联数据量
+  // ══════════════════════════════════════════════════════════
+
+  async countTaskDeleteStats(taskIds: string[]): Promise<{
+    taskCount: number;
+    waybillCount: number;
+    logCount: number;
+    typeBreakdown: Record<string, number>;
+  }> {
+    if (taskIds.length === 0) {
+      return { taskCount: 0, waybillCount: 0, logCount: 0, typeBreakdown: {} };
+    }
+    const result = await this.pool.query(
+      `SELECT
+        type,
+        COUNT(*)::int AS cnt
+       FROM tasks
+       WHERE id = ANY($1::uuid[])
+         AND status IN ('done', 'failed', 'cancelled')
+       GROUP BY type`,
+      [taskIds]
+    );
+    const typeBreakdown: Record<string, number> = {};
+    let taskCount = 0;
+    for (const row of result.rows) {
+      typeBreakdown[row.type] = parseInt(row.cnt, 10);
+      taskCount += parseInt(row.cnt, 10);
+    }
+
+    const wrResult = await this.pool.query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM waybill_results WHERE task_id = ANY($1::uuid[])`,
+      [taskIds]
+    );
+    const logResult = await this.pool.query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM task_logs WHERE task_id = ANY($1::uuid[])`,
+      [taskIds]
+    );
+
+    return {
+      taskCount,
+      waybillCount: parseInt(wrResult.rows[0].cnt, 10),
+      logCount: parseInt(logResult.rows[0].cnt, 10),
+      typeBreakdown,
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 2f. deleteTasks() — 批量删除选中任务
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 批量删除任务（自动跳过 running/pending 状态的任务）
+   * @returns 删除统计
+   */
+  async deleteTasks(taskIds: string[]): Promise<{
+    success: number;
+    skipped: number;
+    deletedWaybills: number;
+    deletedLogs: number;
+  }> {
+    if (taskIds.length === 0) {
+      return { success: 0, skipped: 0, deletedWaybills: 0, deletedLogs: 0 };
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 找出可删除的任务（done/failed/cancelled）
+      const validResult = await client.query<{ id: string }>(
+        `SELECT id FROM tasks
+         WHERE id = ANY($1::uuid[])
+           AND status IN ('done', 'failed', 'cancelled')`,
+        [taskIds]
+      );
+      const validIds = validResult.rows.map(r => r.id);
+      const skipped = taskIds.length - validIds.length;
+
+      if (validIds.length === 0) {
+        await client.query('COMMIT');
+        return { success: 0, skipped, deletedWaybills: 0, deletedLogs: 0 };
+      }
+
+      const logResult = await client.query<{ cnt: string }>(
+        `WITH deleted AS (DELETE FROM task_logs WHERE task_id = ANY($1::uuid[]) RETURNING 1)
+         SELECT COUNT(*)::text AS cnt FROM deleted`,
+        [validIds]
+      );
+      const wrResult = await client.query<{ cnt: string }>(
+        `WITH deleted AS (DELETE FROM waybill_results WHERE task_id = ANY($1::uuid[]) RETURNING 1)
+         SELECT COUNT(*)::text AS cnt FROM deleted`,
+        [validIds]
+      );
+      await client.query(
+        `DELETE FROM tasks WHERE id = ANY($1::uuid[])`,
+        [validIds]
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        success: validIds.length,
+        skipped,
+        deletedWaybills: parseInt(wrResult.rows[0].cnt, 10),
+        deletedLogs: parseInt(logResult.rows[0].cnt, 10),
+      };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 3. insertWaybillResults() — 批量插入运单结果
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 批量插入运单结果（一条 SQL 多行 VALUES，万单级写入性能）
+   *
+   * 原理：将 N 条 WaybillResult 拼成一条 INSERT INTO ... VALUES ($1,$2,...), ($9,$10,...), ...
+   * pg 模块原生支持这种模式，单次 SQL 即可插入数千行。
+   *
+   * 安全：全部使用 $N 参数化查询，无 SQL 注入风险。
+   *
+   * @param taskId    任务 ID
+   * @param batchSeq  批次序号
+   * @param results   运单结果数组
+   */
+  async insertWaybillResults(
+    taskId: string,
+    batchSeq: number,
+    results: WaybillResult[]
+  ): Promise<void> {
+    if (results.length === 0) return;
+
+    const columnCount = 8; // 每行 8 个字段
+    const values: unknown[] = [];
+    const rows: string[] = [];
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const base = i * columnCount;
+      values.push(
+        taskId,           // $1, $9, $17, ...
+        batchSeq,         // $2, $10, $18, ...
+        r.waybillNo,      // $3, $11, $19, ...
+        r.staffName || null,  // $4, ...
+        r.success,        // $5, ...
+        r.message,        // $6, ...
+        r.timestamp,      // $7, ...
+        r.status || null  // $8, ...
+      );
+      rows.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`);
+    }
+
+    // 单条 SQL：避免多次网络往返
+    await this.pool.query(
+      `INSERT INTO waybill_results (task_id, batch_seq, waybill_no, staff_name, success, message, timestamp, status)
+       VALUES ${rows.join(', ')}`,
+      values
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 4. upsertWaybillPool() — 运单池 UPSERT（对账基石）
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 更新运单池最新状态
+   *
+   * 使用 PostgreSQL INSERT ... ON CONFLICT DO UPDATE：
+   *   - waybill_no 不存在 → INSERT 新记录
+   *   - waybill_no 已存在 → UPDATE status / task_id / updated_at
+   *
+   * 这是"总部/商户对账找差集"的核心基础设施：
+   *   - 运单池维护每个运单的最新状态
+   *   - 对比外部系统数据即可找出差异运单
+   *
+   * @param waybillNo  运单号
+   * @param siteId     所属网点
+   * @param status     最新状态
+   * @param taskId     最后一次处理此运单的任务
+   */
+  async upsertWaybillPool(
+    waybillNo: string,
+    siteId: string,
+    status: string,
+    taskId: string
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO waybill_pool (waybill_no, site_id, status, task_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (waybill_no) DO UPDATE
+         SET status = EXCLUDED.status,
+             task_id = EXCLUDED.task_id,
+             updated_at = NOW()`,
+      [waybillNo, siteId, status, taskId]
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 5. insertTaskLogs() — 批量插入任务日志
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 批量插入任务日志
+   *
+   * 与 insertWaybillResults 采用相同的多行 VALUES 模式。
+   * 参数化查询，全部使用 $N 占位符。
+   *
+   * Phase 4-C: task_logs.id 列为 UUID 类型，但调用方（AssignmentEngine）生成的 id
+   * 格式为 "${Date.now()}-${random}" 不是合法 UUID，导致 INSERT 失败。
+   * 修复：使用 PG 内置 gen_random_uuid() 生成主键，忽略调用方传入的非 UUID id。
+   * task_logs.id 仅为自增主键，无外键引用，替换安全。
+   *
+   * @param logs  日志条目数组
+   */
+  async insertTaskLogs(logs: TaskLogEntry[]): Promise<void> {
+    if (logs.length === 0) return;
+
+    const columnCount = 7; // task_id, timestamp, level, message, source, staff_name, window_id
+    const values: unknown[] = [];
+    const rows: string[] = [];
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+      const base = i * columnCount;
+      values.push(
+        log.taskId,
+        log.timestamp,
+        log.level,
+        log.message,
+        log.source,
+        log.staffName || null,
+        log.windowId || null
+      );
+      rows.push(`(gen_random_uuid(), $${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`);
+    }
+
+    await this.pool.query(
+      `INSERT INTO task_logs (id, task_id, timestamp, level, message, source, staff_name, window_id)
+       VALUES ${rows.join(', ')}`,
+      values
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 6. getTaskLogs() — 查询任务日志
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 查询任务日志（按 timestamp 倒序，支持分页）
+   *
+   * @param taskId  任务 ID
+   * @param limit   每页条数（默认 100）
+   * @param offset  偏移量（默认 0）
+   * @returns { logs: TaskLogEntry[], total: number }
+   */
+  async getTaskLogs(
+    taskId: string,
+    limit = 100,
+    offset = 0
+  ): Promise<{ logs: TaskLogEntry[]; total: number }> {
+    const [dataResult, countResult] = await Promise.all([
+      this.pool.query(
+        `SELECT id, task_id, timestamp, level, message, source, staff_name, window_id
+         FROM task_logs
+         WHERE task_id = $1
+         ORDER BY timestamp DESC
+         LIMIT $2 OFFSET $3`,
+        [taskId, limit, offset]
+      ),
+      this.pool.query<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM task_logs WHERE task_id = $1`,
+        [taskId]
+      ),
+    ]);
+
+    const logs: TaskLogEntry[] = dataResult.rows.map((row: any) => ({
+      id: row.id,
+      taskId: row.task_id,
+      timestamp: Number(row.timestamp),
+      level: row.level as TaskLogEntry['level'],
+      message: row.message,
+      source: row.source,
+      staffName: row.staff_name || undefined,
+      windowId: row.window_id || undefined,
+    }));
+
+    return { logs, total: parseInt(countResult.rows[0].cnt, 10) };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 7. getTaskWaybills() — 查询任务运单明细
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 查询任务下所有运单明细，支持按 status 和员工过滤
+   *
+   * @param taskId       任务 ID
+   * @param statusFilter 可选状态过滤（SUCCESS / PARTIAL / FAILED 等）
+   * @param staffFilter  可选员工过滤（staff_name）
+   * @returns { waybills: WaybillResult[], total: number }
+   */
+  async getTaskWaybills(
+    taskId: string,
+    statusFilter?: string,
+    staffFilter?: string,
+  ): Promise<{ waybills: WaybillResult[]; total: number }> {
+    const conditions: string[] = ['task_id = $1'];
+    const params: unknown[] = [taskId];
+    let paramIdx = 2;
+
+    if (statusFilter) {
+      conditions.push(`status = $${paramIdx}`);
+      params.push(statusFilter);
+      paramIdx++;
+    }
+
+    if (staffFilter) {
+      conditions.push(`staff_name = $${paramIdx}`);
+      params.push(staffFilter);
+      paramIdx++;
+    }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+    const [dataResult, countResult] = await Promise.all([
+      this.pool.query(
+        `SELECT waybill_no, staff_name, success, message, timestamp, status
+         FROM waybill_results
+         ${whereClause}
+         ORDER BY timestamp DESC`,
+        params
+      ),
+      this.pool.query<{ cnt: string }>(
+        `SELECT COUNT(*) AS cnt FROM waybill_results ${whereClause}`,
+        params
+      ),
+    ]);
+
+    const waybills: WaybillResult[] = dataResult.rows.map((row: any) => ({
+      waybillNo: row.waybill_no,
+      staffName: row.staff_name || undefined,
+      success: row.success,
+      message: row.message || '',
+      timestamp: Number(row.timestamp),
+      status: row.status || undefined,
+    }));
+
+    return { waybills, total: parseInt(countResult.rows[0].cnt, 10) };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 8. getTaskSummary() — 任务摘要聚合查询
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 聚合查询：返回任务基础信息 + 各状态运单数量统计
+   *
+   * 一次 SQL 完成：task 信息 + 按 status 分组的 COUNT
+   *
+   * @param taskId  任务 ID
+   * @returns 任务摘要（含运单统计）
+   */
+  async getTaskSummary(taskId: string): Promise<{
+    taskId: string;
+    type: string;
+    siteId: string;
+    status: string;
+    totalCount: number;
+    doneCount: number;
+    failCount: number;
+    createdAt: string;
+    finishedAt: string | null;
+    successCount: number;
+    partialCount: number;
+    failedCount: number;
+    unknownCount: number;
+  } | null> {
+    const [taskResult, statsResult] = await Promise.all([
+      this.pool.query(
+        `SELECT id, type, site_id, status, total_count, done_count, fail_count, created_at, finished_at
+         FROM tasks WHERE id = $1`,
+        [taskId]
+      ),
+      this.pool.query<{ status: string; cnt: string }>(
+        `SELECT COALESCE(status, 'UNKNOWN') AS status, COUNT(*)::text AS cnt
+         FROM waybill_results
+         WHERE task_id = $1
+         GROUP BY status`,
+        [taskId]
+      ),
+    ]);
+
+    if (taskResult.rows.length === 0) return null;
+
+    const t = taskResult.rows[0] as any;
+
+    // 构建 status → count 映射
+    const countMap: Record<string, number> = { SUCCESS: 0, PARTIAL: 0, FAILED: 0, UNKNOWN: 0 };
+    for (const row of statsResult.rows) {
+      const key = row.status === 'UNKNOWN_NEEDS_MANUAL_CHECK' ? 'UNKNOWN' : row.status;
+      countMap[key] = (countMap[key] || 0) + parseInt(row.cnt, 10);
+    }
+
+    return {
+      taskId: t.id,
+      type: t.type,
+      siteId: t.site_id,
+      status: t.status,
+      totalCount: t.total_count,
+      doneCount: t.done_count,
+      failCount: t.fail_count,
+      createdAt: t.created_at instanceof Date ? t.created_at.toISOString() : String(t.created_at),
+      finishedAt: t.finished_at
+        ? (t.finished_at instanceof Date ? t.finished_at.toISOString() : String(t.finished_at))
+        : null,
+      successCount: countMap.SUCCESS || 0,
+      partialCount: countMap.PARTIAL || 0,
+      failedCount: countMap.FAILED || 0,
+      unknownCount: countMap.UNKNOWN || 0,
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 9. getTaskStaffSummary() — 任务执行人员统计
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 查询任务下所有执行人员的运单统计（SQL 聚合，禁止前端统计）
+   *
+   * 统计规则：
+   *   - total: 全部记录数
+   *   - successCount: success=true
+   *   - failCount: success=false
+   *
+   * @param taskId  任务 ID
+   * @returns 员工统计列表（可能为空数组）
+   */
+  async getTaskStaffSummary(taskId: string): Promise<{
+    staffName: string;
+    total: number;
+    successCount: number;
+    failCount: number;
+  }[]> {
+    // 主查询：从 waybill_results 按 staff_name 聚合（新任务 + 已修复的历史任务）
+    const result = await this.pool.query<{
+      staff_name: string;
+      cnt: string;
+      success_cnt: string;
+      fail_cnt: string;
+    }>(
+      `SELECT
+         staff_name,
+         COUNT(*)::text AS cnt,
+         COUNT(*) FILTER (WHERE success)::text AS success_cnt,
+         COUNT(*) FILTER (WHERE NOT success)::text AS fail_cnt
+       FROM waybill_results
+       WHERE task_id = $1
+         AND staff_name IS NOT NULL
+       GROUP BY staff_name
+       ORDER BY staff_name`,
+      [taskId]
+    );
+
+    if (result.rows.length > 0) {
+      return result.rows.map(row => ({
+        staffName: row.staff_name,
+        total: parseInt(row.cnt, 10),
+        successCount: parseInt(row.success_cnt, 10),
+        failCount: parseInt(row.fail_cnt, 10),
+      }));
+    }
+
+    // 兜底：waybill_results 中无 staff_name 数据（历史 Arrival 任务）
+    // 从 tasks.input_data.assignments 恢复员工→运单映射，再通过运单号关联结果
+    const taskResult = await this.pool.query<{ input_data: any; site_id: string }>(
+      `SELECT input_data, site_id FROM tasks WHERE id = $1`,
+      [taskId]
+    );
+
+    if (taskResult.rows.length === 0 || !taskResult.rows[0].input_data) {
+      return [];
+    }
+
+    const inputData = taskResult.rows[0].input_data;
+    const assignments: Array<{ staffName: string; waybillNos: string[] }> =
+      inputData.assignments || [];
+
+    if (assignments.length === 0) {
+      // 兼容旧 Arrival 模式：waybillNos 数组（无 assignment）
+      const waybillNos: string[] = inputData.waybillNos || [];
+      if (waybillNos.length === 0) return [];
+
+      // 查所有 waybill_results，统计全局（单 Worker 场景）
+      const statsResult = await this.pool.query<{ cnt: string; success_cnt: string; fail_cnt: string }>(
+        `SELECT
+           COUNT(*)::text AS cnt,
+           COUNT(*) FILTER (WHERE success)::text AS success_cnt,
+           COUNT(*) FILTER (WHERE NOT success)::text AS fail_cnt
+         FROM waybill_results
+         WHERE task_id = $1`,
+        [taskId]
+      );
+
+      if (statsResult.rows.length === 0) return [];
+
+      const stats = statsResult.rows[0];
+      return [{
+        staffName: '(管理员)',
+        total: parseInt(stats.cnt, 10),
+        successCount: parseInt(stats.success_cnt, 10),
+        failCount: parseInt(stats.fail_cnt, 10),
+      }];
+    }
+
+    // 多个 Assignment → 按员工统计
+    const workerStats: Array<{ staffName: string; total: number; successCount: number; failCount: number }> = [];
+
+    for (const assignment of assignments) {
+      if (!assignment.waybillNos || assignment.waybillNos.length === 0) continue;
+
+      const statsResult = await this.pool.query<{ cnt: string; success_cnt: string; fail_cnt: string }>(
+        `SELECT
+           COUNT(*)::text AS cnt,
+           COUNT(*) FILTER (WHERE success)::text AS success_cnt,
+           COUNT(*) FILTER (WHERE NOT success)::text AS fail_cnt
+         FROM waybill_results
+         WHERE task_id = $1
+           AND waybill_no = ANY($2::text[])`,
+        [taskId, assignment.waybillNos]
+      );
+
+      const stats = statsResult.rows[0];
+      const total = parseInt(stats.cnt, 10);
+      if (total > 0) {
+        workerStats.push({
+          staffName: assignment.staffName,
+          total,
+          successCount: parseInt(stats.success_cnt, 10),
+          failCount: parseInt(stats.fail_cnt, 10),
+        });
+      }
+    }
+
+    return workerStats;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 事务辅助
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 在事务中执行回调
+   *
+   * @param fn  业务逻辑。接收 PoolClient，可执行多次 query。
+   *            抛出异常 → 自动 ROLLBACK；正常返回 → 自动 COMMIT
+   */
+  async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // 生命周期
+  // ══════════════════════════════════════════════════════════
+
+  /** 释放连接池（在应用停机时调用） */
+  async close(): Promise<void> {
+    await this.pool.end();
+    PgDatabase.instance = null;
+    this.initialized = false;
+    console.log('[PgDatabase] 连接池已关闭');
+  }
+}

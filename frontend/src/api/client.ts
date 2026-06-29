@@ -1,0 +1,866 @@
+// API 客户端
+// 封装所有后端 REST 接口调用，统一错误处理
+//
+// ⚠️ 以下所有类型必须与 src/types/api-contracts.ts 保持 1:1 同步
+//    任何字段新增/变更 → 先改 api-contracts.ts → 再改本文件
+//    版本: v1.0 (2026-06-22)
+
+// ── 基础字面量类型 ──
+// MUST SYNC WITH src/types/api-contracts.ts
+
+/** 任务生命周期状态 */
+export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
+
+/** 任务类型 */
+export type TaskType = 'arrive' | 'dispatch' | 'sign' | 'integrated';
+
+/** 窗口角色 */
+export type WindowRole = 'admin' | 'staff';
+
+/** 日志级别 */
+export type LogLevel = 'info' | 'warning' | 'error';
+
+/** 运单结果详细状态 */
+export type WaybillResultStatus = 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'UNKNOWN_NEEDS_MANUAL_CHECK' | 'DRY_RUN_SKIPPED';
+
+// ── 核心实体 ──
+// MUST SYNC WITH src/types/api-contracts.ts
+
+/** EasyBR 窗口信息 */
+export interface WindowInfo {
+  id: string;
+  name: string;
+  cdpPort: number;
+  role: WindowRole;
+  site: string;
+  staffName: string | null;
+  isConnected: boolean;
+  /** 是否启用（用户 toggle 状态） */
+  enabled: boolean;
+}
+
+/** 运行时指标快照 */
+export interface RuntimeMetricsSnapshot {
+  popupDismissCount: number;
+  sessionRecoverCount: number;
+  sessionRecoverSuccessCount: number;
+  sessionRecoverFailCount: number;
+  navigationFixCount: number;
+  taskSuccessCount: number;
+  taskFailCount: number;
+  startTime: string;
+  snapshotTime: string;
+  uptimeMs: number;
+}
+
+/** 运单操作结果 */
+export interface WaybillResult {
+  waybillNo: string;
+  /** 处理该运单的员工姓名（到件扫描可能为 undefined） */
+  staffName?: string;
+  success: boolean;
+  message: string;
+  timestamp: number;
+  /** 详细状态（此前缺失，现已修复） */
+  status?: WaybillResultStatus;
+  /** Phase 9-dryrun: 试运行模式标记 */
+  dryRun?: boolean;
+  /** Phase 9-dryrun: 是否跳过了最终提交 */
+  skippedFinalSubmit?: boolean;
+}
+
+/** 向后兼容别名 */
+export type OperationResult = WaybillResult;
+
+/** 任务执行日志 */
+export interface TaskLogEntry {
+  id: string;
+  taskId: string;
+  timestamp: number;
+  level: LogLevel;
+  message: string;
+  source: string;
+  staffName?: string;
+  windowId?: string;
+}
+
+/** 任务列表项 */
+export interface TaskItem {
+  id: string;
+  type: TaskType;
+  site: string;
+  /** 网点显示名称，例如 "天南大"，无名称时回退为 site id */
+  siteName?: string;
+  /** 含 'cancelled'（此前缺失，现已修复） */
+  status: TaskStatus;
+  totalCount: number;
+  doneCount: number;
+  failCount: number;
+  inputData?: string;
+  createdAt: string;
+  finishedAt?: string | null;
+  /** 参与员工数（来自 waybill_results.staff_name DISTINCT） */
+  staffCount?: number;
+}
+
+/** 网点窗口凭据 */
+export interface WindowCredential {
+  windowName: string;
+  employeeName: string;
+  username: string;
+  password: string;
+  /** EasyBR 浏览器 ID（精准定位，用于直接 open 窗口） */
+  easybrBrowserId?: string;
+}
+
+/** 网点配置 */
+export interface SiteConfig {
+  id: string;
+  name: string;
+  windows: WindowCredential[];
+}
+
+// ── API 请求/响应契约 ──
+// MUST SYNC WITH src/types/api-contracts.ts
+
+/** GET /api/status 响应 */
+export interface StatusResponse {
+  total: number;
+  connected: number;
+  windows: WindowInfo[];
+  /** 运行时指标快照（此前缺失，现已修复） */
+  runtimeMetrics: RuntimeMetricsSnapshot;
+}
+
+/** GET /api/operations/:taskId 响应 */
+export interface TaskProgressResponse {
+  taskId: string;
+  /** 含 'cancelled'（此前缺失，现已修复） */
+  status: TaskStatus;
+  total: number;
+  done: number;
+  failCount: number;
+  results: WaybillResult[];
+}
+
+/** 向后兼容别名 */
+export type TaskProgress = TaskProgressResponse;
+
+/** GET /api/operations 响应 */
+export interface TaskListResponse {
+  page: number;
+  limit: number;
+  /** 符合条件的任务真实总数（此前仅返回当前页长度，语义错误，现已修复） */
+  total: number;
+  tasks: TaskItem[];
+}
+
+/** POST /api/operations/* 响应 */
+export interface TaskSubmitResponse {
+  taskId: string;
+  status: 'pending';
+}
+
+/** GET /api/settings/config 响应 */
+export interface SettingsConfigResponse {
+  initialized: boolean;
+  sites: SiteConfig[];
+}
+
+// ── 任务详情 API 响应 ──
+
+/** GET /api/tasks/:id/logs 响应 */
+export interface TaskLogsResponse {
+  taskId: string;
+  logs: TaskLogEntry[];
+  total: number;
+}
+
+/** GET /api/tasks/:id/waybills 响应 */
+export interface TaskWaybillsResponse {
+  taskId: string;
+  waybills: WaybillResult[];
+  total: number;
+}
+
+/** GET /api/tasks/:id/summary 响应 */
+export interface TaskSummaryResponse {
+  taskId: string;
+  type: string;
+  siteId: string;
+  status: string;
+  totalCount: number;
+  doneCount: number;
+  failCount: number;
+  createdAt: string;
+  finishedAt: string | null;
+  successCount: number;
+  partialCount: number;
+  failedCount: number;
+  unknownCount: number;
+}
+
+/** GET /api/tasks/:id/staff 响应 */
+export interface TaskStaffResponse {
+  taskId: string;
+  workers: WorkerStat[];
+}
+
+export interface WorkerStat {
+  staffName: string;
+  total: number;
+  successCount: number;
+  failCount: number;
+}
+
+// ── 常量 ──
+
+const BASE = '/api';
+
+// ── API 方法 ──
+
+/** 获取所有窗口连接状态 */
+export async function fetchStatus(): Promise<StatusResponse> {
+  const resp = await fetch(`${BASE}/status`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 提交到件扫描任务 */
+export async function submitArriveTask(
+  site: string,
+  waybillNos: string[],
+): Promise<TaskSubmitResponse> {
+  const resp = await fetch(`${BASE}/operations/arrive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site, waybillNos }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 查询任务进度 */
+export async function getTaskProgress(taskId: string): Promise<TaskProgress> {
+  const resp = await fetch(`${BASE}/operations/${taskId}`);
+  if (!resp.ok) throw new Error(`查询任务失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** 查询任务执行日志 */
+export async function getTaskLogs(taskId: string, limit = 100): Promise<TaskLogEntry[]> {
+  const resp = await fetch(`${BASE}/operations/${taskId}/logs?limit=${limit}`);
+  if (!resp.ok) throw new Error(`查询任务日志失败: HTTP ${resp.status}`);
+  const data = await resp.json();
+  return data.logs || [];
+}
+
+/** 切换窗口开关状态（已开→关闭，已关→打开并自动登录） */
+export async function toggleWindow(browerid: string): Promise<{ isConnected: boolean }> {
+  const resp = await fetch(`${BASE}/windows/${browerid}/toggle`, { method: 'POST' });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** Phase 4-D: 关闭 Playwright 窗口（不删除配置） */
+export async function closePlaywrightWindow(siteId: string, staffName: string): Promise<{ success: boolean; alreadyClosed?: boolean; status?: string }> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/playwright-windows/close`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ staffName }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 获取历史任务列表（支持搜索、筛选、分页） */
+export async function getTaskList(
+  limit = 20,
+  search?: string,
+  type?: string,
+  status?: string,
+  page = 1,
+): Promise<TaskListResponse> {
+  const params = new URLSearchParams({ limit: String(limit), page: String(page) });
+  if (search) params.set('search', search);
+  if (type) params.set('type', type);
+  if (status) params.set('status', status);
+  const resp = await fetch(`${BASE}/operations?${params}`);
+  if (!resp.ok) throw new Error(`获取任务列表失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// ── 统计接口类型 ──
+export interface TaskStatsResponse {
+  tasks: {
+    total: number;
+    running: number;
+    done: number;
+    failed: number;
+    cancelled: number;
+    pending: number;
+  };
+  system: {
+    easybrConnected: boolean;
+    onlineWindows: number;
+    activeWorkers: number;
+    runningTasks: number;
+  };
+  warning?: string;
+  /** 交付前加固：PG 不可用时为 true，统计为降级数据 */
+  degraded?: boolean;
+  /** 统计数据来源：pg（PostgreSQL）/ fallback（本地 SQLite）/ empty（空统计） */
+  source?: 'pg' | 'fallback' | 'empty';
+}
+
+/** 获取服务端聚合统计 + 系统状态 */
+export async function getTaskStats(): Promise<TaskStatsResponse> {
+  const resp = await fetch(`${BASE}/operations/stats`);
+  if (!resp.ok) throw new Error(`获取统计失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * 通用任务提交（UnifiedTaskPage 使用）
+ */
+export async function submitTask(
+  api: string,
+  payload: Record<string, unknown>,
+): Promise<TaskSubmitResponse> {
+  const resp = await fetch(api, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 提交派件扫描任务（多员工并发） */
+export async function submitDispatchTask(
+  site: string,
+  assignments: { staffName: string; waybillNos: string[] }[],
+): Promise<TaskSubmitResponse> {
+  const resp = await fetch(`${BASE}/operations/dispatch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site, assignments }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 提交到派一体扫描任务 */
+export async function submitIntegratedTask(
+  site: string,
+  assignments: { staffName: string; waybillNos: string[] }[],
+): Promise<TaskSubmitResponse> {
+  const resp = await fetch(`${BASE}/operations/integrated`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site, assignments }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/**
+ * 提交签收录入任务（Phase 9-dryrun: 是否真实签收由后端 dryRunMode 控制）
+ */
+export async function submitSignTask(
+  site: string,
+  assignments: { staffName: string; waybillNos: string[] }[],
+): Promise<TaskSubmitResponse> {
+  const resp = await fetch(`${BASE}/operations/sign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site, assignments }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ── 系统设置 API ──
+
+/** 获取系统设置配置（网点 + 窗口凭据） */
+export async function getSettingsConfig(): Promise<SettingsConfigResponse> {
+  const resp = await fetch(`${BASE}/settings/config`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 验证管理员 PIN 码 */
+export async function verifyPin(pin: string): Promise<{ ok: boolean }> {
+  const resp = await fetch(`${BASE}/settings/verify-pin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 更新系统设置配置 */
+export async function updateSettingsConfig(sites: SiteConfig[]): Promise<{ ok: boolean }> {
+  const resp = await fetch(`${BASE}/settings/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sites }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ── 任务详情 API（基于 PgDatabase） ──
+
+/** 查询任务执行日志（从 PG task_logs 表） */
+export async function getTaskLogsById(
+  taskId: string,
+  limit = 100,
+  offset = 0,
+): Promise<TaskLogsResponse> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  const resp = await fetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/logs?${params}`);
+  if (!resp.ok) throw new Error(`查询任务日志失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** 查询任务运单明细（从 PG waybill_results 表，支持 status + staffName 过滤） */
+export async function getTaskWaybills(
+  taskId: string,
+  status?: string,
+  staffName?: string,
+): Promise<TaskWaybillsResponse> {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (staffName) params.set('staffName', staffName);
+  const qs = params.toString();
+  const resp = await fetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/waybills${qs ? `?${qs}` : ''}`);
+  if (!resp.ok) throw new Error(`查询运单明细失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** 查询任务摘要（任务信息 + 运单统计） */
+export async function getTaskSummary(taskId: string): Promise<TaskSummaryResponse> {
+  const resp = await fetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/summary`);
+  if (!resp.ok) throw new Error(`查询任务摘要失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** 查询任务执行人员统计 */
+export async function getTaskStaffSummary(taskId: string): Promise<TaskStaffResponse> {
+  const resp = await fetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/staff`);
+  if (!resp.ok) throw new Error(`查询员工统计失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** 清理 30 天前已结束的历史任务 */
+export interface CleanupResponse {
+  deletedTasks: number;
+  deletedWaybills: number;
+  deletedLogs: number;
+}
+
+export async function cleanupTasks(days?: number): Promise<CleanupResponse> {
+  const resp = await fetch(`${BASE}/tasks/cleanup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days: days ?? 30 }),
+  });
+  if (!resp.ok) throw new Error(`清理任务失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** GET /api/settings/data-retention — 获取数据保留配置 */
+export interface DataRetentionConfig {
+  retentionDays: number;
+  cleanupFrequency: 'weekly' | 'monthly' | 'off';
+}
+
+export async function getDataRetentionConfig(): Promise<DataRetentionConfig> {
+  const resp = await fetch(`${BASE}/settings/data-retention`);
+  if (!resp.ok) throw new Error(`获取数据保留配置失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** PUT /api/settings/data-retention — 更新数据保留配置 */
+export async function updateDataRetentionConfig(config: DataRetentionConfig): Promise<{ success: boolean }> {
+  const resp = await fetch(`${BASE}/settings/data-retention`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!resp.ok) throw new Error(`更新数据保留配置失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** POST /api/tasks/delete-stats — 统计选中任务关联数据量 */
+export interface DeleteStatsResponse {
+  taskCount: number;
+  waybillCount: number;
+  logCount: number;
+  typeBreakdown: Record<string, number>;
+}
+
+export async function getTaskDeleteStats(taskIds: string[]): Promise<DeleteStatsResponse> {
+  const resp = await fetch(`${BASE}/tasks/delete-stats`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskIds }),
+  });
+  if (!resp.ok) throw new Error(`获取删除统计失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** POST /api/tasks/batch-delete — 批量删除任务 */
+export interface BatchDeleteResponse {
+  success: number;
+  skipped: number;
+  deletedWaybills: number;
+  deletedLogs: number;
+}
+
+export async function batchDeleteTasks(taskIds: string[]): Promise<BatchDeleteResponse> {
+  const resp = await fetch(`${BASE}/tasks/batch-delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskIds }),
+  });
+  if (!resp.ok) throw new Error(`删除任务失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// ── 窗口初始化 API ──
+
+/** POST /api/windows/init — 提交窗口初始化任务 */
+export interface InitWindowResponse {
+  taskId: string;
+  status: string;
+  windowId: string;
+}
+
+export async function initWindow(siteId: string, windowId: string): Promise<InitWindowResponse> {
+  const resp = await fetch(`${BASE}/windows/init`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site_id: siteId, window_id: windowId }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** GET /api/windows/status — 所有窗口状态及最新 init_task */
+export interface WindowStatusItem {
+  id: string;
+  name: string;
+  role: string;
+  site: string;
+  staffName: string | null;
+  isConnected: boolean;
+  updatedAt: string;
+  latestInitTask: {
+    taskId: string;
+    status: string;
+    createdAt: string;
+    finishedAt: string | null;
+  } | null;
+}
+
+export interface WindowsStatusResponse {
+  windows: WindowStatusItem[];
+  bySite: Record<string, WindowStatusItem[]>;
+  totals: { total: number; connected: number };
+}
+
+export async function getWindowsStatus(): Promise<WindowsStatusResponse> {
+  const resp = await fetch(`${BASE}/windows/status`);
+  if (!resp.ok) throw new Error(`查询窗口状态失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// ── 站点窗口 4 态 API ──
+
+/** 窗口状态 */
+export type WindowState = 'offline' | 'connecting' | 'login_required' | 'connected' | 'ready' | 'busy' | 'degraded' | 'failed';
+
+/** 单个站点窗口状态 */
+export interface SiteWindowState {
+  windowName: string;
+  employeeName: string;
+  browserId: string | null;
+  status: WindowState;
+}
+
+/** GET /api/sites/:siteId/windows 响应 */
+export interface SiteWindowsResponse {
+  siteId: string;
+  siteName: string;
+  windows: SiteWindowState[];
+  /** EasyBR 状态接口健康（熔断器 + openedList 异常监控） */
+  easybrHealth?: {
+    openedListAbnormal: boolean;
+    anomalyDurationMs: number;
+    /** 熔断器是否打开（连续失败5次后熔断5分钟） */
+    circuitBreakerOpen: boolean;
+    /** 熔断剩余时间（毫秒） */
+    circuitBreakerRemainingMs: number;
+    /** 是否需要提示用户重连（熔断中 或 openedList 异常超过30s） */
+    reconnectNeeded: boolean;
+    /** 状态描述文字 */
+    message: string;
+  };
+}
+
+export async function getSiteWindows(siteId: string): Promise<SiteWindowsResponse> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/windows`);
+  if (!resp.ok) throw new Error(`查询站点窗口失败: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** POST /api/sites/:siteId/windows/launch-all 响应 */
+export interface LaunchAllResponse {
+  launched: number;
+  failed: number;
+  partial: number;
+  total: number;
+  timeout: boolean;
+  success: boolean;
+  message: string;
+  windows: { windowName: string; staffName: string; browserId: string; status: string; ready: boolean; message?: string }[];
+}
+
+export async function launchAllWindows(siteId: string): Promise<LaunchAllResponse> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/windows/launch-all`, {
+    method: 'POST',
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ── Phase 4-B: Window Runtime Mode API（playwright 模式专用） ──
+
+/** 窗口运行模式（与 backend/config/runtimeMode.ts 对齐） */
+export type WindowRuntimeMode = 'legacy_easybr' | 'playwright';
+
+/** GET /api/runtime-mode 响应 */
+export interface WindowRuntimeModeResponse {
+  runtimeMode: WindowRuntimeMode;
+}
+
+/** playwright 模式下的单个窗口状态（含 runtimeKey/runtimeMode 标记） */
+export interface PlaywrightSiteWindowState extends SiteWindowState {
+  /** 标记为 playwright 模式窗口（前端据此区分点击行为） */
+  runtimeMode?: 'playwright';
+  /** Playwright runtimeKey = tenantId:siteId:windowId */
+  runtimeKey?: string;
+  // ── Phase 4-B READY 守卫诊断字段 ──
+  /** 当前页面 URL */
+  currentUrl?: string;
+  /** 当前标签页数量（应为 1） */
+  pageCount?: number;
+  /** 当前激活页 URL */
+  activePageUrl?: string;
+  /** P0 检查是否通过（ready 状态必须为 true） */
+  p0Passed?: boolean;
+  /** P0 失败的检查项名 */
+  p0FailedCheck?: string | null;
+  /** P0 失败原因 */
+  p0FailedReason?: string | null;
+}
+
+/** GET /api/sites/:siteId/playwright-windows 响应 */
+export interface PlaywrightSiteWindowsResponse {
+  siteId: string;
+  siteName: string;
+  windows: PlaywrightSiteWindowState[];
+  /** playwright 模式标识 */
+  runtimeMode: 'playwright';
+}
+
+/** 获取当前窗口运行模式（只读，不触发启动） */
+export async function getWindowRuntimeMode(): Promise<WindowRuntimeModeResponse> {
+  const resp = await fetch(`${BASE}/runtime-mode`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 查询站点 Playwright 窗口状态（仅查询缓存，不触发启动） */
+export async function getSitePlaywrightWindows(siteId: string): Promise<PlaywrightSiteWindowsResponse> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/playwright-windows`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** POST /api/sites/:siteId/playwright-windows/launch-all 响应 */
+export interface PlaywrightLaunchAllResponse {
+  launched: number;
+  failed: number;
+  partial: number;
+  total: number;
+  timeout: boolean;
+  success: boolean;
+  message: string;
+  windows: { windowName: string; staffName: string; runtimeKey: string; status: string; ready: boolean; message?: string }[];
+  runtimeMode: 'playwright';
+}
+
+/** 一键启动该网点所有 offline 的 Playwright 窗口 */
+export async function launchAllPlaywrightWindows(siteId: string): Promise<PlaywrightLaunchAllResponse> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/playwright-windows/launch-all`, {
+    method: 'POST',
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** POST /api/sites/:siteId/playwright-windows/ensure 响应 */
+export interface PlaywrightEnsureResponse {
+  success: boolean;
+  runtimeKey: string;
+  status: string;
+  ready: boolean;
+  launched: boolean;
+  currentUrl?: string;
+  isLoggedIn?: boolean;
+  message?: string;
+  runtimeMode: 'playwright';
+  // ── Phase 4-B READY 守卫诊断字段 ──
+  pageCount?: number;
+  activePageUrl?: string;
+  p0Passed?: boolean;
+  p0FailedCheck?: string | null;
+  p0FailedReason?: string | null;
+}
+
+/** 启动单个员工的 Playwright Chrome 窗口（headed=true, keepOpen=true） */
+export async function ensurePlaywrightWindow(siteId: string, staffName: string): Promise<PlaywrightEnsureResponse> {
+  const resp = await fetch(`${BASE}/sites/${siteId}/playwright-windows/ensure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ staffName }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ── EasyBR 浏览器控制 API ──
+
+/** POST /api/easybr/open-browser — 打开/聚焦浏览器窗口 */
+export async function openBrowser(browserId: string): Promise<{ ok: boolean; ws: string; http: string }> {
+  const resp = await fetch(`${BASE}/easybr/open-browser`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ browserId }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** POST /api/easybr/reconnect — 手动重连 EasyBR（清除熔断器/缓存/异常状态） */
+export async function reconnectEasyBR(): Promise<{ ok: boolean; message: string }> {
+  const resp = await fetch(`${BASE}/easybr/reconnect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+// ── 运行模式 API（Phase 9-dryrun） ──
+
+/** 运行模式类型 */
+export type RuntimeMode = 'dry-run' | 'real';
+
+/** GET /api/runtime/mode 响应 */
+export interface RuntimeModeResponse {
+  dryRunMode: boolean;
+  mode: RuntimeMode;
+}
+
+/** POST /api/runtime/mode 响应 */
+export interface RuntimeModeUpdateResponse {
+  success: boolean;
+  dryRunMode: boolean;
+  mode: RuntimeMode;
+}
+
+/** 获取当前运行模式 */
+export async function getRuntimeMode(): Promise<RuntimeModeResponse> {
+  const resp = await fetch(`${BASE}/runtime/mode`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+/** 修改运行模式 */
+export async function updateRuntimeMode(dryRunMode: boolean): Promise<RuntimeModeUpdateResponse> {
+  const resp = await fetch(`${BASE}/runtime/mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dryRunMode }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ error: '请求失败' }));
+    throw new Error(err.error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}

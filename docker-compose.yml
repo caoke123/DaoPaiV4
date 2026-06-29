@@ -1,0 +1,100 @@
+version: "3.8"
+
+# ══════════════════════════════════════════════════════════════
+# DaoPai V3 — SaaS 云端平台 + Local Agent 方向
+#
+# 隔离声明（与 DaoPai V2 完全隔离）：
+#   - 容器名前缀: daopai-v3-*
+#   - volume 前缀: daopai_v3_*
+#   - 数据库: daopai_v3（V2 为 daopai_next）
+#   - PG 端口: 5436（V2 为 5435）
+#   - Redis 端口: 6381（V2 为 6380）
+#   - 应用端口: 3300（V2 为 3200）
+#   - runtime 目录: ./runtime/（与 V2 独立）
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ────────────────────────────────────────────────────────────
+  # PostgreSQL 16 — DaoPai V3 数据库（daopai_v3）
+  # ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: daopai-v3-postgres
+    ports:
+      - "5436:5432"
+    environment:
+      POSTGRES_USER: daopai
+      POSTGRES_PASSWORD: daopai_secret
+      POSTGRES_DB: daopai_v3
+    volumes:
+      - daopai_v3_pgdata:/var/lib/postgresql/data
+      - ./database/schema/init-schema.sql:/docker-entrypoint-initdb.d/01-init-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U daopai -d daopai_v3"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  # Redis 7 — 预留：后续会员系统会话/隔离缓存
+  # 当前阶段未接入业务代码，仅启动容器备用
+  # ────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: daopai-v3-redis
+    ports:
+      - "6381:6379"
+    volumes:
+      - daopai_v3_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────────
+  # DaoPai V3 — 应用服务
+  # 后端 Express + Playwright（自带浏览器，不依赖 EasyBR）
+  # ────────────────────────────────────────────────────────────
+  daopai-v3-app:
+    build: .
+    container_name: daopai-v3-app
+    ports:
+      - "3300:3300"
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      # PostgreSQL 连接（daopai_v3）
+      - PG_HOST=127.0.0.1
+      - PG_PORT=5436
+      - PG_USER=daopai
+      - PG_PASSWORD=daopai_secret
+      - PG_DATABASE=daopai_v3
+      - PG_POOL_MAX=20
+      # Redis 连接（预留）
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6381
+      # CDP 调试端口（legacy EasyBR 模式预留，新项目默认不使用）
+      - CDP_PORTS=
+      # legacy: EasyBR API（新项目不依赖，保留环境变量供 legacy 代码兜底）
+      - EASYBR_API=http://127.0.0.1:3001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+# ────────────────────────────────────────────────────────────
+# 命名卷：与 V2 完全隔离（daopai_v3_* 前缀）
+# ────────────────────────────────────────────────────────────
+volumes:
+  daopai_v3_pgdata:
+    name: daopai_v3_pgdata
+  daopai_v3_redisdata:
+    name: daopai_v3_redisdata

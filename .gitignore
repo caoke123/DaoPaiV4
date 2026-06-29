@@ -1,0 +1,43 @@
+# 依赖
+node_modules/
+frontend/node_modules/
+
+# 构建产物
+dist/
+frontend/dist/
+
+# 数据库文件（含运行时数据）
+data/*.db
+data/*.db-journal
+data/*.json
+!data/settings.example.json
+data/results/
+data/postgres/
+
+# 归档文件（本地备份，不提交）
+archive/
+
+# 运行时日志、截图、下载、Playwright profiles（bnsy-operator-next 专属 runtime 目录）
+runtime/logs/
+runtime/screenshots/
+runtime/downloads/
+runtime/profiles/
+
+# 环境变量
+.env
+.env.local
+
+# 敏感凭据（含真实账号密码，禁止提交）
+backend/config/credentials.ts
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Debug artifacts
+.dbg/
+debug-*.md
