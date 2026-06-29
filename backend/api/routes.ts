@@ -15,7 +15,8 @@ import { taskEventBus, type TaskEvent } from '../utils/TaskEventBus';
 import { RuntimeMetrics } from '../runtime/RuntimeMetrics';
 import { SettingsManager } from '../config/SettingsManager';
 import { isLoginCapableWindow } from '../config/SettingsManager';
-import { PgDatabase, DEFAULT_TENANT_ID } from '../db/PgDatabase';
+import { PgDatabase } from '../db/PgDatabase';
+import { getTenantId, getWorkstationId } from './middleware/requestContext';
 // Phase D-1: 统一任务执行引擎
 import { AssignmentEngine, ArrivalHandler, DispatchHandler, IntegratedHandler, SignHandler, InitWindowHandler, type Assignment } from '../modules/assignment-engine';
 // 类型仅用于请求体校验（业务执行已交给 Engine）
@@ -248,6 +249,7 @@ router.post('/api/windows/init', async (req: Request, res: Response) => {
         doneCount: 0,
         failCount: 0,
         inputData,
+        workstationId: getWorkstationId(req),
       });
     } catch (e) {
       console.error('[PG] insertTask init_window failed:', (e as Error).message);
@@ -976,6 +978,7 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
       doneCount: 0,
       failCount: 0,
       inputData,
+      workstationId: getWorkstationId(req),
     });
   } catch (e) {
     console.error('[PG] insertTask arrive failed:', (e as Error).message);
@@ -1103,6 +1106,7 @@ router.post('/api/operations/dispatch', async (req: Request, res: Response) => {
       doneCount: 0,
       failCount: 0,
       inputData,
+      workstationId: getWorkstationId(req),
     });
   } catch (e) {
     console.error('[PG] insertTask dispatch failed:', (e as Error).message);
@@ -1227,6 +1231,7 @@ router.post('/api/operations/integrated', async (req: Request, res: Response) =>
       doneCount: 0,
       failCount: 0,
       inputData,
+      workstationId: getWorkstationId(req),
     });
   } catch (e) {
     console.error('[PG] insertTask integrated failed:', (e as Error).message);
@@ -1352,6 +1357,7 @@ router.post('/api/operations/sign', async (req: Request, res: Response) => {
       doneCount: 0,
       failCount: 0,
       inputData,
+      workstationId: getWorkstationId(req),
     });
   } catch (e) {
     console.error('[PG] insertTask sign failed:', (e as Error).message);
@@ -1394,7 +1400,7 @@ router.post('/api/operations/sign', async (req: Request, res: Response) => {
 });
 
 /** GET /api/operations/stats — 服务端聚合统计 + 系统状态（必须在 /:taskId 之前注册） */
-router.get('/api/operations/stats', async (_req: Request, res: Response) => {
+router.get('/api/operations/stats', async (req: Request, res: Response) => {
   try {
     const bp = BrowserPool.getInstance();
     const engine = AssignmentEngine.getInstance();
@@ -1419,7 +1425,7 @@ router.get('/api/operations/stats', async (_req: Request, res: Response) => {
 
     try {
       const pg = PgDatabase.getInstance();
-      stats = await pg.getTaskStats();
+      stats = await pg.getTaskStats(getTenantId(req));
     } catch (pgErr) {
       // PG 不可用，降级到本地 SQLite 统计
       console.error('[GET /api/operations/stats] PG 不可用，降级到本地统计:', (pgErr as Error).message);
@@ -1619,7 +1625,7 @@ router.get('/api/tasks/:id/logs', async (req: Request, res: Response) => {
     const offset = parseInt(req.query.offset as string) || 0;
 
     const pgDb = PgDatabase.getInstance();
-    const result = await pgDb.getTaskLogs(DEFAULT_TENANT_ID, id, limit, offset);
+    const result = await pgDb.getTaskLogs(getTenantId(req), id, limit, offset);
 
     res.json({ taskId: id, logs: result.logs, total: result.total });
   } catch (e) {
@@ -1636,7 +1642,7 @@ router.get('/api/tasks/:id/waybills', async (req: Request, res: Response) => {
     const staffFilter = req.query.staffName as string | undefined;
 
     const pgDb = PgDatabase.getInstance();
-    const result = await pgDb.getTaskWaybills(DEFAULT_TENANT_ID, id, statusFilter, staffFilter);
+    const result = await pgDb.getTaskWaybills(getTenantId(req), id, statusFilter, staffFilter);
 
     res.json({ taskId: id, waybills: result.waybills, total: result.total });
   } catch (e) {
@@ -1651,7 +1657,7 @@ router.get('/api/tasks/:id/staff', async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const pgDb = PgDatabase.getInstance();
-    const workers = await pgDb.getTaskStaffSummary(DEFAULT_TENANT_ID, id);
+    const workers = await pgDb.getTaskStaffSummary(getTenantId(req), id);
 
     res.json({ taskId: id, workers });
   } catch (e) {
@@ -1666,7 +1672,7 @@ router.get('/api/tasks/:id/summary', async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const pgDb = PgDatabase.getInstance();
-    const summary = await pgDb.getTaskSummary(DEFAULT_TENANT_ID, id);
+    const summary = await pgDb.getTaskSummary(getTenantId(req), id);
 
     if (!summary) {
       return res.status(404).json({ error: '任务不存在' });
@@ -1684,7 +1690,7 @@ router.post('/api/tasks/cleanup', async (req: Request, res: Response) => {
   try {
     const days = (req.body?.days && typeof req.body.days === 'number') ? req.body.days : 30;
     const pgDb = PgDatabase.getInstance();
-    const result = await pgDb.cleanupOldTasks(DEFAULT_TENANT_ID, days);
+    const result = await pgDb.cleanupOldTasks(getTenantId(req), days);
     res.json(result);
   } catch (e) {
     console.error('[POST /api/tasks/cleanup] 失败:', (e as Error).message);
@@ -1759,7 +1765,7 @@ router.post('/api/tasks/delete-stats', async (req: Request, res: Response) => {
       return res.json({ taskCount: 0, waybillCount: 0, logCount: 0, typeBreakdown: {} });
     }
     const pgDb = PgDatabase.getInstance();
-    const stats = await pgDb.countTaskDeleteStats(DEFAULT_TENANT_ID, taskIds);
+    const stats = await pgDb.countTaskDeleteStats(getTenantId(req), taskIds);
     res.json(stats);
   } catch (e) {
     console.error('[POST /api/tasks/delete-stats] 失败:', (e as Error).message);
@@ -1775,7 +1781,7 @@ router.post('/api/tasks/batch-delete', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'taskIds 不能为空' });
     }
     const pgDb = PgDatabase.getInstance();
-    const result = await pgDb.deleteTasks(DEFAULT_TENANT_ID, taskIds);
+    const result = await pgDb.deleteTasks(getTenantId(req), taskIds);
     res.json(result);
   } catch (e) {
     console.error('[POST /api/tasks/batch-delete] 失败:', (e as Error).message);
@@ -1905,7 +1911,7 @@ router.get('/api/operations', async (req: Request, res: Response) => {
       // 设置未初始化时不影响任务列表展示
     }
 
-    const result = await pg.getTaskList(DEFAULT_TENANT_ID, page, limit, filterType, status, filterSearch);
+    const result = await pg.getTaskList(getTenantId(req), page, limit, filterType, status, filterSearch);
 
     const tasks = result.tasks.map((t) => ({
       ...t,
