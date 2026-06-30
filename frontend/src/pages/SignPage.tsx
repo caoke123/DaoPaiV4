@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AlertCircle, RotateCcw, Play, Trash2, Users, Settings2, ListChecks, Shield, AlertTriangle } from 'lucide-react';
-import type { TaskLogEntry as ApiTaskLogEntry } from '../api/client';
-import { submitTask } from '../api/client';
+import type { TaskLogEntry as ApiTaskLogEntry, TaskLogEntry } from '../api/client';
+import { submitTask, getTaskLogsById, getTaskStatus } from '../api/client';
 import { useWindowState } from '../components/shared/WindowStateProvider';
 import { useTaskExecution } from '../components/shared/TaskExecutionContext';
 import { useRuntimeMode } from '../components/shared/RuntimeModeProvider';
@@ -81,6 +81,56 @@ export default function SignPage() {
     selectedWorkers: ctxSelectedWorkers, allocations: ctxAllocations, taskOrigin,
     startTask: ctxStartTask, resetTask: ctxResetTask, clearLogs: ctxClearLogs, setSubmitting: ctxSetSubmitting,
   } = useTaskExecution();
+
+  // ── 独立 PG 日志轮询（fallback：TaskExecutionContext 的 workerLogs 可能为空）──
+  const [livePgLogs, setLivePgLogs] = useState<TaskLogEntry[]>([]);
+  const livePgLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const livePgDoneRef = useRef(false);
+
+  useEffect(() => {
+    if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+    livePgDoneRef.current = false;
+    setLivePgLogs([]);
+    if (!taskId) return;
+
+    console.log(`[SignPage-LiveLogs] start polling taskId=${taskId}`);
+    getTaskLogsById(taskId, 200).then(data => {
+      console.log(`[SignPage-LiveLogs] initial fetch logs=${data.logs.length}`);
+      setLivePgLogs(data.logs);
+    }).catch(e => console.error('[SignPage-LiveLogs] fetch failed:', (e as Error).message));
+
+    livePgLogRef.current = setInterval(async () => {
+      if (livePgDoneRef.current) return;
+      try {
+        const data = await getTaskLogsById(taskId, 200);
+        setLivePgLogs(data.logs);
+      } catch (e) {
+        console.error('[SignPage-LiveLogs] poll failed:', (e as Error).message);
+      }
+    }, 1500);
+
+    const statusTimer = setInterval(async () => {
+      if (livePgDoneRef.current) return;
+      try {
+        const s = await getTaskStatus(taskId);
+        if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
+          livePgDoneRef.current = true;
+          console.log(`[SignPage-LiveLogs] stop polling status=${s.status}`);
+          try {
+            const data = await getTaskLogsById(taskId, 200);
+            setLivePgLogs(data.logs);
+          } catch { /* ignore */ }
+          if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+          clearInterval(statusTimer);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+
+    return () => {
+      if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+      clearInterval(statusTimer);
+    };
+  }, [taskId]);
 
   const SUBMIT_API = '/api/operations/sign';
 
@@ -819,7 +869,11 @@ export default function SignPage() {
             {displayWorkers.map(name => {
               const color = getWindowColor(name);
               const wp = workerProgress[name] || { done: 0, total: 1, failed: 0 };
-              const logs = workerLogs[name] || [];
+              // 优先用 TaskExecutionContext 的 workerLogs；为空时 fallback 到 SignPage 独立轮询的 livePgLogs
+              const ctxLogs = workerLogs[name] || [];
+              const logs = ctxLogs.length > 0
+                ? ctxLogs
+                : livePgLogs.filter(l => !l.staffName || l.staffName === name);
               const pct = wp.total > 0 ? Math.round((wp.done / wp.total) * 100) : 0;
               const ps = getWorkerPageSize(name);
               return (

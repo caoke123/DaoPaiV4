@@ -4,7 +4,7 @@
 // Phase 9-dryrun: 右上角显示运行模式 Tag，真实模式隐藏"测试数据"按钮
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AlertCircle, RotateCcw, Wand2, Trash2, Shield, AlertTriangle } from 'lucide-react';
-import { submitTask } from '../../api/client';
+import { submitTask, getTaskLogsById, getTaskStatus, type TaskLogEntry } from '../../api/client';
 import { useWindowState } from '../shared/WindowStateProvider';
 import { useTaskExecution } from '../shared/TaskExecutionContext';
 import { useRuntimeMode } from '../shared/RuntimeModeProvider';
@@ -124,6 +124,64 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     selectedWorkers: ctxSelectedWorkers, allocations: ctxAllocations, taskOrigin,
     startTask: ctxStartTask, resetTask: ctxResetTask, clearLogs: ctxClearLogs, setSubmitting: ctxSetSubmitting,
   } = useTaskExecution();
+
+  // ── 独立 PG 日志轮询（fallback：TaskExecutionContext 的 workerLogs 可能为空）──
+  // taskId 存在即启动，不依赖 liveStatus，每 1.5 秒全量拉取
+  const [livePgLogs, setLivePgLogs] = useState<TaskLogEntry[]>([]);
+  const livePgLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const livePgDoneRef = useRef(false);
+
+  useEffect(() => {
+    // 清理旧轮询
+    if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+    livePgDoneRef.current = false;
+    setLivePgLogs([]);
+
+    if (!taskId) return;
+
+    console.log(`[ScanWorkbench-LiveLogs] start polling taskId=${taskId}`);
+
+    // 立即拉一次
+    getTaskLogsById(taskId, 200).then(data => {
+      console.log(`[ScanWorkbench-LiveLogs] initial fetch logs=${data.logs.length}`);
+      setLivePgLogs(data.logs);
+    }).catch(e => console.error('[ScanWorkbench-LiveLogs] fetch failed:', (e as Error).message));
+
+    // 日志轮询 1.5 秒
+    livePgLogRef.current = setInterval(async () => {
+      if (livePgDoneRef.current) return;
+      try {
+        const data = await getTaskLogsById(taskId, 200);
+        setLivePgLogs(data.logs);
+      } catch (e) {
+        console.error('[ScanWorkbench-LiveLogs] poll failed:', (e as Error).message);
+      }
+    }, 1500);
+
+    // 状态轮询 2 秒（独立判断 done）
+    const statusTimer = setInterval(async () => {
+      if (livePgDoneRef.current) return;
+      try {
+        const s = await getTaskStatus(taskId);
+        if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
+          livePgDoneRef.current = true;
+          console.log(`[ScanWorkbench-LiveLogs] stop polling status=${s.status}`);
+          // 拉最终日志
+          try {
+            const data = await getTaskLogsById(taskId, 200);
+            setLivePgLogs(data.logs);
+          } catch { /* ignore */ }
+          if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+          clearInterval(statusTimer);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+
+    return () => {
+      if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
+      clearInterval(statusTimer);
+    };
+  }, [taskId]);
 
   const validCount = hideWaybillInput ? selectedWorkers.length : validWaybills.length;
 
@@ -851,7 +909,11 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
             {displayWorkers.map(name => {
               const color = getWindowColor(name);
               const wp = workerProgress[name] || { done: 0, total: displayAllocations[name] || 0, failed: 0 };
-              const logs = workerLogs[name] || [];
+              // 优先用 TaskExecutionContext 的 workerLogs；为空时 fallback 到 ScanWorkbench 独立轮询的 livePgLogs
+              const ctxLogs = workerLogs[name] || [];
+              const logs = ctxLogs.length > 0
+                ? ctxLogs
+                : livePgLogs.filter(l => !l.staffName || l.staffName === name);
               const pct = wp.total > 0 ? Math.round((wp.done / wp.total) * 100) : 0;
               return (
                 <div key={name} className="log-card">
