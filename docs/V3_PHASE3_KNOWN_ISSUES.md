@@ -1,12 +1,13 @@
 # DaoPai V3 Phase 3 已知问题与处理意见
 
-> 最后更新：2026-06-29（Phase 3-J 验收）
-> 当前 commit：`4f83515` — fix: protect frontend routes and simplify system navigation
+> 最后更新：2026-06-30（Phase 4-G 验收）
+> 当前 commit：`104ed9a` — feat: add Agent task loop dry run
 
 ## 1. 当前阶段结论
 
-Phase 3 全部已完成。npm test 全量 132 tests，128 passed，4 failed。
-4 个失败均为 ISSUE-008（credentials.ts 占位数据），与 Phase 3 所有阶段无关。
+Phase 4 全部已完成。npm test 全量 132 tests，128 passed，4 failed。
+4 个失败均为 ISSUE-008（credentials.ts 占位数据），与 Phase 3/4 所有阶段无关。
+Phase 4 未引入新的已知问题。
 
 ## 2. 已知问题列表
 
