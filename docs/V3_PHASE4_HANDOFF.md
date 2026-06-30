@@ -14,14 +14,14 @@ DaoPai V3
 ├── Cloud Platform（云端管理中心）
 │   ├── 用户登录（JWT，15分钟 access + 7天 refresh）
 │   ├── 任务中心（任务列表、状态、日志、详情）
-│   ├── 系统管理（机构、网点、工作站、用户，只读）
+│   ├── 系统管理（快递公司、网点、执行电脑、用户，只读）
 │   ├── 任务状态真理源（PostgreSQL 主写）
 │   └── /agent/* API（Agent 专属接口）
 │
 └── Local Agent（本地执行端）
     ├── 心跳上报（15秒/次）
     ├── 任务拉取（HTTP 轮询）
-    ├── 任务执行（模拟/真实）
+    ├── 任务执行（当前仅支持 agent_test 模拟任务，真实业务任务尚未接入）
     ├── 进度回传
     ├── 日志回传
     └── 结果回传（complete/fail）
@@ -41,11 +41,10 @@ DaoPai V3
 DaoPai V3/
 ├── backend/
 │   ├── agent/
-│   │   ├── agentRoutes.ts          # /agent/* 路由定义
-│   │   └── agentRouter.ts          # Agent 路由注册
+│   │   └── agentRoutes.ts          # /agent/* 路由定义
 │   ├── auth/
 │   │   ├── agentAuth.ts            # requireAgent 中间件
-│   │   ├── agentToken.ts           # Agent Token 生成/验证
+│   │   ├── agentToken.ts           # 执行电脑授权码生成/验证
 │   │   └── types.ts                # AgentPrincipal 类型
 │   ├── scripts/
 │   │   └── createAgentDevToken.ts  # 开发用授权码生成脚本
@@ -60,7 +59,7 @@ DaoPai V3/
 │   │   ├── logger.ts               # 日志系统
 │   │   ├── startupCheck.ts         # 启动检查
 │   │   └── types.ts                # 类型定义
-│   ├── agent.json.example          # 配置模板
+│   ├── agent.example.json          # 配置模板（agent.json 由本地复制生成，不提交 Git）
 │   ├── package.json
 │   └── tsconfig.json
 │
@@ -80,7 +79,7 @@ DaoPai V3/
 
 ### 3.1 Agent 接口（/agent/*）
 
-全部使用 `requireAgent` 中间件鉴权（Bearer Agent Token）。
+全部使用 `requireAgent` 中间件鉴权（Bearer 执行电脑授权码）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -148,11 +147,14 @@ Cloud 标记 tasks（status=done, progress=100, finished_at=NOW()）
 | 字段 | 说明 |
 |------|------|
 | agent_token_hash | 执行电脑授权码 SHA-256 hash |
-| token_created_at | 授权码生成时间 |
-| token_revoked_at | 授权码撤销时间 |
+| agent_token_created_at | 授权码生成时间 |
+| agent_token_last_used_at | 授权码最后使用时间 |
+| agent_token_revoked_at | 授权码撤销时间 |
 | last_heartbeat_at | 最后心跳时间 |
-| agent_version | Agent 版本号 |
+| agent_version | 本地执行端版本 |
 | online_status | 在线状态（online/offline） |
+| browser_status | 本地运行环境状态 |
+| last_ip | 最近连接 IP |
 
 ### tasks 表
 

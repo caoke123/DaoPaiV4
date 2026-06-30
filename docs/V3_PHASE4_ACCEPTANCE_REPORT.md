@@ -30,13 +30,13 @@ Phase 4 通过，可以进入 Phase 5：真实任务迁移设计。
 | 4-D | packages/agent 项目骨架 | `e758bf3` | 完成 |
 | 4-E | /agent/me + /agent/heartbeat 心跳 | `4c8865b` | 完成 |
 | 4-F | agent_test 任务最小闭环 DRY-RUN | `104ed9a` | 完成 |
-| 4-G | 验收与交接文档 | 当前 | 进行中 |
+| 4-G | 验收与交接文档 | 本次提交 | 完成 |
 
 ### 2.1 Phase 4-A：Cloud / Agent 边界
 
 明确了 Cloud Platform 与 Local Agent 的职责边界：
 
-- **Cloud Platform**：管理租户、用户、任务、日志、结果，下发任务给 Agent，不直接操作浏览器
+- **Cloud Platform**：管理快递公司、用户、任务、日志、结果，下发任务给 Agent，不直接操作浏览器
 - **Local Agent**：安装在本机，拉取任务、执行浏览器自动化、回传进度与结果，不管理 SaaS 用户
 
 ### 2.2 Phase 4-B：执行电脑授权码鉴权
@@ -52,7 +52,7 @@ Phase 4 通过，可以进入 Phase 5：真实任务迁移设计。
 
 定义了 Agent 与 Cloud 之间的 HTTP 协议：
 
-- 全量鉴权：所有 `/agent/*` 接口需要 Bearer Agent Token
+- 全量鉴权：所有 `/agent/*` 接口需要 Bearer 执行电脑授权码
 - 统一响应格式：`{ ok, data, timestamp }` 或 `{ ok, code, message, timestamp }`
 - 协议规范文档：`docs/V3_PHASE4C_AGENT_API_PROTOCOL.md`
 
@@ -95,7 +95,7 @@ Phase 4 通过，可以进入 Phase 5：真实任务迁移设计。
 | 能力 | 状态 |
 |------|------|
 | 执行电脑授权码生成 | 通过 |
-| Agent Token hash 存储 | 通过 |
+| 执行电脑授权码 hash 存储 | 通过 |
 | GET /agent/me | 通过 |
 | POST /agent/heartbeat | 通过 |
 | 执行电脑在线状态更新 | 通过 |
@@ -153,7 +153,7 @@ Phase 4 新增 2 个 migration：
 
 | Migration | 说明 |
 |-----------|------|
-| `004_v3_agent_token_auth.sql` | workstations 表增加 agent_token_hash、token_created_at、token_revoked_at、last_heartbeat_at、agent_version 等字段 |
+| `004_v3_agent_token_auth.sql` | workstations 表增加 agent_token_hash、agent_token_created_at、agent_token_last_used_at、agent_token_revoked_at、last_heartbeat_at、agent_version 等字段 |
 | `005_v3_agent_task_loop.sql` | tasks 表增加 assigned 状态、agent_test 类型、assigned_at、progress 字段及索引 |
 
 ---
@@ -170,11 +170,10 @@ Phase 4 累计修改/新增文件：
 
 ### 后端
 
-- `backend/auth/agentToken.ts` — Agent Token 生成与验证
+- `backend/auth/agentToken.ts` — 执行电脑授权码生成与验证
 - `backend/auth/agentAuth.ts` — requireAgent 中间件
 - `backend/auth/types.ts` — AgentPrincipal 类型
 - `backend/agent/agentRoutes.ts` — /agent/* 路由
-- `backend/agent/agentRouter.ts` — Agent 路由注册
 - `backend/scripts/createAgentDevToken.ts` — 开发用授权码生成脚本
 - `backend/db/PgDatabase.ts` — Agent 相关数据库方法
 - `backend/api/routes.ts` — agent-test-task 创建接口
