@@ -1,13 +1,26 @@
 /**
- * HTTP Client 骨架
+ * HTTP Client
  *
  * 封装对 Cloud /agent/* 接口的 HTTP 请求。
- * 本阶段只实现 /agent/me 和 /agent/heartbeat 方法骨架，
- * 其他接口保留 TODO 注释。
  */
 
 import axios, { type AxiosInstance } from 'axios';
 import type { AgentConfig, HeartbeatRequest, HeartbeatResponse, AgentMeResponse } from './types';
+
+/** 任务拉取响应 */
+export interface PullTaskResponse {
+  hasTask: boolean;
+  task: {
+    taskId: string;
+    type: string;
+    siteId: string;
+    siteName: string;
+    status: string;
+    payload: Record<string, unknown>;
+    createdAt: string;
+  } | null;
+  nextPollAfterMs: number;
+}
 
 /** 创建带鉴权的 HTTP 客户端 */
 export function createHttpClient(config: AgentConfig): AxiosInstance {
@@ -20,7 +33,6 @@ export function createHttpClient(config: AgentConfig): AxiosInstance {
     },
   });
 
-  // 响应拦截：统一处理错误
   client.interceptors.response.use(
     (res) => res,
     (err) => {
@@ -42,19 +54,13 @@ export function createHttpClient(config: AgentConfig): AxiosInstance {
   return client;
 }
 
-/**
- * 验证执行电脑授权码，获取执行电脑信息
- * GET /agent/me
- */
+/** GET /agent/me */
 export async function getAgentMe(client: AxiosInstance): Promise<AgentMeResponse> {
   const res = await client.get('/agent/me');
   return res.data.data;
 }
 
-/**
- * 发送心跳，上报在线状态
- * POST /agent/heartbeat
- */
+/** POST /agent/heartbeat */
 export async function sendHeartbeat(
   client: AxiosInstance,
   payload: HeartbeatRequest,
@@ -63,9 +69,61 @@ export async function sendHeartbeat(
   return res.data.data;
 }
 
-// TODO Phase 4-E/F：以下方法待实现
-// - pullTask(client, capabilities, siteId) → POST /agent/tasks/pull
-// - reportProgress(client, taskId, progress) → POST /agent/tasks/:id/progress
-// - uploadLogs(client, taskId, logs) → POST /agent/tasks/:id/logs
-// - completeTask(client, taskId, result) → POST /agent/tasks/:id/complete
-// - failTask(client, taskId, error) → POST /agent/tasks/:id/fail
+/**
+ * POST /agent/tasks/pull — 拉取待执行任务
+ */
+export async function pullTask(client: AxiosInstance): Promise<PullTaskResponse> {
+  const res = await client.post('/agent/tasks/pull', {});
+  return res.data.data;
+}
+
+/**
+ * POST /agent/tasks/:id/progress — 上报任务进度
+ */
+export async function reportProgress(
+  client: AxiosInstance,
+  taskId: string,
+  status: string,
+  progress: number,
+  currentAction?: string,
+): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/progress`, {
+    status,
+    progress,
+    currentAction: currentAction || '',
+  });
+}
+
+/**
+ * POST /agent/tasks/:id/logs — 批量上报日志
+ */
+export async function uploadLogs(
+  client: AxiosInstance,
+  taskId: string,
+  logs: Array<{ level: string; message: string; timestamp: string }>,
+): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/logs`, { logs });
+}
+
+/**
+ * POST /agent/tasks/:id/complete — 任务完成
+ */
+export async function completeTask(
+  client: AxiosInstance,
+  taskId: string,
+): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/complete`, {});
+}
+
+/**
+ * POST /agent/tasks/:id/fail — 任务失败
+ */
+export async function failTask(
+  client: AxiosInstance,
+  taskId: string,
+  errorMessage: string,
+): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/fail`, {
+    error: { code: 'UNKNOWN_ERROR', message: errorMessage },
+  });
+}

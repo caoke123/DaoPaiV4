@@ -109,12 +109,13 @@ export async function requireAgent(req: Request, res: Response, next: NextFuncti
   const result = await parseAgentToken(req);
 
   if (!result.ok) {
-    return res.status(result.status).json({
+    res.status(result.status).json({
       ok: false,
       code: result.code,
       message: result.message,
       timestamp: new Date().toISOString(),
     });
+    return;
   }
 
   // 注入 principal

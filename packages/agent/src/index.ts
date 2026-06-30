@@ -1,22 +1,105 @@
 /**
  * DaoPai 本地执行端 — 启动入口
  *
- * 当前阶段：心跳闭环（Phase 4-E），不执行任务。
- * 后续 Phase 4-F 才做任务拉取与执行。
+ * 当前阶段：任务管道最小闭环（Phase 4-F），不接真实浏览器。
+ * 后续 Phase 4-E+ 才接真实浏览器执行。
  */
 
 import { loadConfig } from './config';
 import { initLogger, logger, safeLog } from './logger';
 import { startupCheck } from './startupCheck';
-import { createHttpClient, getAgentMe, sendHeartbeat } from './httpClient';
+import {
+  createHttpClient,
+  getAgentMe,
+  sendHeartbeat,
+  pullTask,
+  reportProgress,
+  uploadLogs,
+  completeTask,
+  failTask,
+} from './httpClient';
+import type { AxiosInstance } from 'axios';
 import type { AgentConfig } from './types';
 
 let shuttingDown = false;
+let runningTaskId: string | null = null;
+
+async function executeAgentTestTask(
+  client: AxiosInstance,
+  taskId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const durationMs = (payload.durationMs as number) || 3000;
+  const message = (payload.message as string) || 'Agent 测试任务';
+
+  console.log(`发现测试任务：${taskId}`);
+  console.log(`任务内容：${message}`);
+  console.log(`模拟执行时长：${durationMs}ms`);
+  logger.info(`开始执行测试任务 ${taskId}`);
+
+  try {
+    // 1. 上报开始日志
+    await uploadLogs(client, taskId, [{
+      level: 'info',
+      message: `开始测试任务：${message}`,
+      timestamp: new Date().toISOString(),
+    }]);
+
+    // 2. 上报 running 10%
+    await reportProgress(client, taskId, 'running', 10);
+    console.log('进度：10%');
+    logger.info(`任务 ${taskId} 进度：10%`);
+
+    // 3. 模拟执行
+    await new Promise(resolve => setTimeout(resolve, durationMs / 2));
+
+    // 4. 上报 50%
+    await reportProgress(client, taskId, 'running', 50);
+    await uploadLogs(client, taskId, [{
+      level: 'info',
+      message: '测试任务执行中...',
+      timestamp: new Date().toISOString(),
+    }]);
+    console.log('进度：50%');
+    logger.info(`任务 ${taskId} 进度：50%`);
+
+    // 5. 继续模拟
+    await new Promise(resolve => setTimeout(resolve, durationMs / 2));
+
+    // 6. 上报 100%
+    await reportProgress(client, taskId, 'running', 100);
+    console.log('进度：100%');
+    logger.info(`任务 ${taskId} 进度：100%`);
+
+    // 7. 上报完成日志
+    await uploadLogs(client, taskId, [{
+      level: 'success',
+      message: '测试任务完成',
+      timestamp: new Date().toISOString(),
+    }]);
+
+    // 8. complete
+    await completeTask(client, taskId);
+    console.log('测试任务完成，已回传 Cloud');
+    logger.info(`任务 ${taskId} 已完成`);
+  } catch (err) {
+    const msg = (err as Error).message;
+    logger.error(`任务 ${taskId} 执行失败：${msg}`);
+    console.error(`任务执行失败：${msg}`);
+
+    try {
+      await failTask(client, taskId, msg);
+      logger.info(`任务 ${taskId} 已标记为 failed`);
+    } catch {
+      logger.error(`任务 ${taskId} 标记失败时出错`);
+    }
+  }
+}
 
 async function main(): Promise<void> {
   console.log('========================================');
   console.log('  DaoPai 本地执行端 v0.1.0');
-  console.log('  当前阶段：心跳闭环，尚未启用任务执行');
+  console.log('  当前阶段：任务管道最小闭环，模拟执行');
   console.log('========================================');
   console.log('');
 
@@ -34,22 +117,6 @@ async function main(): Promise<void> {
   console.log('正在执行启动检查...\n');
   const result = await startupCheck(config);
 
-  console.log('');
-  console.log('启动检查结果：');
-  for (const item of result.items) {
-    console.log(`  ${item}`);
-  }
-
-  if (result.warnings.length > 0) {
-    console.log('');
-    console.log('警告：');
-    for (const w of result.warnings) {
-      console.log(`  ⚠ ${w}`);
-    }
-  }
-
-  console.log('');
-
   if (!result.ok) {
     logger.error('启动检查未通过，本地执行端退出');
     process.exit(1);
@@ -64,13 +131,11 @@ async function main(): Promise<void> {
     console.log(`执行电脑：${me.name}`);
     console.log(`快递公司：${me.tenantName}`);
     console.log(`所属网点：${me.siteName || '未绑定'}`);
-    console.log(`执行电脑编号：${me.workstationId}`);
     logger.info(`授权码验证成功，执行电脑：${me.name}`);
   } catch (err) {
     const msg = (err as Error).message;
     logger.error(`授权码验证失败：${msg}`);
     console.error(`错误：${msg}`);
-    console.error('请检查执行电脑授权码是否正确，或联系管理员');
     process.exit(1);
   }
 
@@ -79,32 +144,48 @@ async function main(): Promise<void> {
   console.log('按 Ctrl+C 停止\n');
   logger.info('心跳循环已启动');
 
-  // 6. 心跳主循环
-  const heartbeat = async () => {
+  // 6. 心跳 + 任务轮询主循环
+  const tick = async () => {
     if (shuttingDown) return;
 
     try {
+      // 发送心跳（如果正在执行任务，告知 Cloud）
       const resp = await sendHeartbeat(client, {
         agentVersion: '0.1.0',
         machineFingerprint: 'placeholder',
         browserStatus: 'unknown',
         localStatus: {
-          runningTaskId: null,
+          runningTaskId,
           pendingLogCount: 0,
           diskFreeMb: 0,
         },
       });
 
-      if (resp.hasTask) {
-        logger.info('Cloud 提示可能有任务等待（本阶段不拉取）');
+      // 如果有任务且当前没有在执行，拉取任务
+      if (resp.hasTask && !runningTaskId) {
+        try {
+          const pullResp = await pullTask(client);
+          if (pullResp.hasTask && pullResp.task) {
+            const task = pullResp.task;
+
+            // 只处理 agent_test 类型
+            if (task.type === 'agent_test') {
+              runningTaskId = task.taskId;
+              await executeAgentTestTask(client, task.taskId, task.payload);
+              runningTaskId = null;
+            }
+          }
+        } catch (err) {
+          const msg = (err as Error).message;
+          safeLog('warn', `任务拉取失败：${msg}`, config.agentToken);
+          runningTaskId = null;
+        }
       }
     } catch (err) {
       const msg = (err as Error).message;
-      // 401/403 时停止心跳
-      if (msg.includes('401') || msg.includes('403') || msg.includes('授权码无效') || msg.includes('已停用') || msg.includes('已删除')) {
+      if (msg.includes('401') || msg.includes('403') || msg.includes('授权码') || msg.includes('已停用')) {
         logger.error(`心跳失败（鉴权错误）：${msg}`);
         console.error(`心跳失败：${msg}`);
-        console.error('执行电脑授权码可能已失效，请重新配置');
         shuttingDown = true;
         return;
       }
@@ -112,11 +193,11 @@ async function main(): Promise<void> {
     }
   };
 
-  // 立即发送第一次心跳
-  await heartbeat();
+  // 立即执行第一次
+  await tick();
 
-  // 定时心跳
-  const timer = setInterval(() => heartbeat(), config.heartbeatIntervalMs);
+  // 定时循环
+  const timer = setInterval(() => tick(), config.heartbeatIntervalMs);
 
   // 优雅退出
   const shutdown = () => {

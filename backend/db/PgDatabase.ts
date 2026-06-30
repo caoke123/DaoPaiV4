@@ -1687,4 +1687,190 @@ export class PgDatabase {
       ]
     );
   }
+
+  // ══════════════════════════════════════════════════════════
+  // 13. Agent 任务管道（Phase 4-F）
+  // ══════════════════════════════════════════════════════════
+
+  /**
+   * 原子拉取一个待执行的 agent_test 任务
+   *
+   * 规则：
+   *   1. 只拉取当前租户下的 pending 任务
+   *   2. 第一版只拉取 type=agent_test
+   *   3. 分配原子化（SELECT ... FOR UPDATE SKIP LOCKED）
+   *   4. 拉取成功后更新 status=assigned, workstation_id, assigned_at
+   *
+   * @param tenantId      租户 ID
+   * @param workstationId 执行电脑 ID
+   * @returns 任务信息或 null（无待执行任务）
+   */
+  async pullPendingTask(
+    tenantId: string,
+    workstationId: string
+  ): Promise<{
+    id: string;
+    type: string;
+    siteId: string;
+    status: string;
+    totalCount: number;
+    inputData: Record<string, unknown> | null;
+    createdAt: string;
+  } | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 原子化：SELECT ... FOR UPDATE SKIP LOCKED 防止并发抢任务
+      const result = await client.query(
+        `SELECT id, type, site_id, status, total_count, input_data, created_at
+         FROM tasks
+         WHERE tenant_id = $1
+           AND status = 'pending'
+           AND type = 'agent_test'
+         ORDER BY created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`,
+        [tenantId]
+      );
+
+      if (result.rows.length === 0) {
+        await client.query('COMMIT');
+        return null;
+      }
+
+      const row = result.rows[0] as any;
+
+      // 更新为 assigned
+      await client.query(
+        `UPDATE tasks
+         SET status = 'assigned',
+             workstation_id = $2,
+             assigned_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [row.id, workstationId]
+      );
+
+      await client.query('COMMIT');
+
+      return {
+        id: row.id,
+        type: row.type,
+        siteId: row.site_id,
+        status: 'assigned',
+        totalCount: row.total_count,
+        inputData: row.input_data,
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      };
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * 更新任务进度
+   *
+   * @param taskId          任务 ID
+   * @param tenantId        租户 ID
+   * @param workstationId   执行电脑 ID
+   * @param progress        进度值（0-100）
+   * @param status          新状态（assigned → running）
+   */
+  async updateTaskProgress(
+    taskId: string,
+    tenantId: string,
+    workstationId: string,
+    progress: number,
+    status: string
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE tasks
+       SET progress = GREATEST(progress, $4),
+           status = CASE WHEN $5 = 'running' AND status = 'assigned' THEN 'running' ELSE status END,
+           updated_at = NOW()
+       WHERE id = $1
+         AND tenant_id = $2
+         AND workstation_id = $3`,
+      [taskId, tenantId, workstationId, progress, status]
+    );
+  }
+
+  /**
+   * 员任务为 done
+   *
+   * 规则：
+   *   1. 只允许 running/assigned 状态的任务 complete
+   *   2. 已 done 的不重复写
+   *
+   * @returns true=操作成功，false=任务已终态（already finished）
+   */
+  async completeAgentTask(
+    taskId: string,
+    tenantId: string,
+    workstationId: string
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE tasks
+       SET status = 'done',
+           progress = 100,
+           finished_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+         AND tenant_id = $2
+         AND workstation_id = $3
+         AND status IN ('assigned', 'running')`,
+      [taskId, tenantId, workstationId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * 标记任务为 failed
+   *
+   * 规则：
+   *   1. 只允许 running/assigned 状态的任务 fail
+   *   2. 已 done 的不允许 fail
+   *
+   * @returns true=操作成功，false=任务已终态
+   */
+  async failAgentTask(
+    taskId: string,
+    tenantId: string,
+    workstationId: string
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE tasks
+       SET status = 'failed',
+           finished_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+         AND tenant_id = $2
+         AND workstation_id = $3
+         AND status IN ('assigned', 'running')`,
+      [taskId, tenantId, workstationId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * 检查是否有待执行任务
+   *
+   * @param tenantId 租户 ID
+   * @returns 是否有 pending 的 agent_test 任务
+   */
+  async hasPendingTask(tenantId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `SELECT 1 FROM tasks
+       WHERE tenant_id = $1
+         AND status = 'pending'
+         AND type = 'agent_test'
+       LIMIT 1`,
+      [tenantId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
 }

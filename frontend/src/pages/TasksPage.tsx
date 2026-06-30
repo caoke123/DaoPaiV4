@@ -101,6 +101,7 @@ const typeLabelMap: Record<string, string> = {
   sign: '签收录入',
   integrated: '到派一体',
   init_window: '窗口初始化',
+  agent_test: '执行电脑测试',
 };
 
 function apiStatusToBatchStatus(s: TaskItem['status']): BatchStatus {
@@ -800,6 +801,7 @@ const TYPE_OPTIONS = [
   { value: 'sign', label: '签收录入' },
   { value: 'integrated', label: '综合任务' },
   { value: 'init_window', label: '窗口初始化' },
+  { value: 'agent_test', label: '执行电脑测试' },
 ];
 
 const STATUS_OPTIONS = [

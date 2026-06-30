@@ -2039,6 +2039,32 @@ router.get('/api/cloud/users', async (req: Request, res: Response) => {
   }
 });
 
+/** POST /api/cloud/agent-test-task — 创建 agent_test 测试任务（Phase 4-F 开发调试用） */
+router.post('/api/cloud/agent-test-task', async (req: Request, res: Response) => {
+  try {
+    const tenantId = getTenantId(req);
+    const { message, durationMs } = req.body || {};
+
+    const pg = PgDatabase.getInstance();
+    const taskId = await pg.insertTask({
+      type: 'agent_test',
+      siteId: 'unknown',
+      status: 'pending',
+      totalCount: 0,
+      inputData: {
+        message: message || 'Agent 测试任务',
+        durationMs: durationMs || 3000,
+      },
+      tenantId,
+    });
+
+    res.json({ ok: true, taskId, message: '测试任务已创建' });
+  } catch (e) {
+    console.error('[POST /api/cloud/agent-test-task] 失败:', (e as Error).message);
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
 /**
  * 启动时清理所有僵尸任务
  * 服务重启后调用：查询 DB 中所有 status='running' 的任务 → 更新为 failed → 记录 Service restarted unexpectedly
