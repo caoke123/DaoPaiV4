@@ -256,6 +256,8 @@ export class BrowserManager {
   // ══════════════════════════════════════════════════════════
 
   async close(): Promise<void> {
+    const { debugPort } = this.config;
+
     // 5a. 关闭 Playwright CDP 连接
     if (this.browser) {
       try {
@@ -268,49 +270,44 @@ export class BrowserManager {
       this.page = null;
     }
 
-    // 5b. 从注册表读取本次 V3 Chrome PID
-    const session = readSession();
-    const pid = this.chromeProcess?.pid || session?.pid;
+    // 5b. 通过端口查找实际 Chrome PID（spawn PID 可能已退出，实际窗口 PID 不同）
+    console.log('  [ChromeProcessGuard] 通过端口查找实际 Chrome PID...');
+    const portCheck = checkPort(debugPort);
 
-    if (!pid) {
-      console.log('  未找到 V3 Chrome 会话记录，跳过进程关闭');
-      clearSession();
-      return;
-    }
-
-    // 5c. 等待 Chrome 自然退出
-    console.log('  等待 Chrome 自然退出...');
-    await new Promise((r) => setTimeout(r, 2000));
-
-    // 5d. 检查 Chrome 是否还活着
-    const isAlive = this.chromeProcess && !this.chromeProcess.killed;
-    if (!isAlive && !session) {
-      console.log('  Chrome 已自然退出');
-      clearSession();
-      return;
-    }
-
-    // 5e. ChromeProcessGuard: 校验 PID 归属
-    console.log(`  [ChromeProcessGuard] 校验 PID ${pid} 归属...`);
-    const killCheck = canKillProcess(pid);
-    console.log(`  [ChromeProcessGuard] ${killCheck.message}`);
-
-    if (!killCheck.allowed) {
-      console.log('  拒绝关闭，请手动处理残留的 Chrome 进程');
-      clearSession();
-      return;
-    }
-
-    // 如果进程已自然退出，无需 kill
-    if (killCheck.message.includes('已自然退出')) {
-      console.log('  Chrome 已自然退出，无需强制关闭');
+    if (!portCheck.occupied || !portCheck.pid) {
+      console.log('  端口已释放，Chrome 已退出');
       clearSession();
       this.chromeProcess = null;
       return;
     }
 
-    // 5f. 关闭 V3 Chrome 进程
-    const killResult = killProcess(pid);
+    const actualPid = portCheck.pid;
+    console.log(`  实际 Chrome PID: ${actualPid}`);
+
+    // 5c. 校验是否是 V3 Chrome
+    if (!portCheck.isV3Chrome) {
+      console.log(`  [ChromeProcessGuard] ${portCheck.message}`);
+      console.log('  拒绝关闭，请手动处理残留的 Chrome 进程');
+      clearSession();
+      return;
+    }
+
+    // 5d. 等待 Chrome 自然退出（给 CDP close 一点时间生效）
+    console.log('  等待 Chrome 自然退出...');
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // 5e. 再次检查端口是否释放
+    const recheck = checkPort(debugPort);
+    if (!recheck.occupied) {
+      console.log('  Chrome 已自然退出，窗口已关闭');
+      clearSession();
+      this.chromeProcess = null;
+      return;
+    }
+
+    // 5f. 仍未退出，强制关闭
+    console.log(`  [ChromeProcessGuard] 强制关闭 V3 Chrome (PID: ${actualPid})...`);
+    const killResult = killProcess(actualPid);
     if (killResult.success) {
       console.log(`  ${killResult.message}`);
     } else {
