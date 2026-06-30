@@ -12,7 +12,11 @@
     "test:bnsy:safety": "tsx src/testBnsyLoginSafety.ts",
     "test:bnsy:login": "tsx src/testBnsyLoginFlow.ts",
     "test:bnsy:p0": "tsx src/testBnsySessionP0.ts",
-    "test:arrival:browser": "tsx src/testArrivalBrowserDryRun.ts"
+    "test:arrival:browser": "tsx src/testArrivalBrowserDryRun.ts",
+    "test:dispatch:browser": "tsx src/testDispatchBrowserDryRun.ts",
+    "test:integrated:browser": "tsx src/testIntegratedBrowserDryRun.ts",
+    "test:sign:browser": "tsx src/testSignBrowserDryRun.ts",
+    "audit:integrated:dom": "tsx src/auditIntegratedDom.ts"
   },
   "dependencies": {
     "axios": "^1.6.0",
