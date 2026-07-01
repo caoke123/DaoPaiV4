@@ -948,14 +948,14 @@ export class PgDatabase {
    * 查询任务日志（按 timestamp 倒序，支持分页）
    *
    * @param taskId  任务 ID
-   * @param limit   每页条数（默认 100）
+   * @param limit   每页条数（默认 500）
    * @param offset  偏移量（默认 0）
    * @returns { logs: TaskLogEntry[], total: number }
    */
   async getTaskLogs(
     tenantId: string = DEFAULT_TENANT_ID,
     taskId: string,
-    limit = 100,
+    limit = 500,
     offset = 0
   ): Promise<{ logs: TaskLogEntry[]; total: number }> {
     const [dataResult, countResult] = await Promise.all([

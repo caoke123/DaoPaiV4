@@ -27,8 +27,8 @@ export type TaskType = 'arrive' | 'dispatch' | 'sign' | 'integrated' | 'init_win
 /** 窗口角色 */
 export type WindowRole = 'admin' | 'staff';
 
-/** 日志级别（后端 → 前端传输用，不含 'success'，那是前端 UI 层的派生类型） */
-export type LogLevel = 'info' | 'warning' | 'error';
+/** 日志级别 */
+export type LogLevel = 'info' | 'success' | 'warning' | 'error';
 
 /** 运单结果详细状态 */
 export type WaybillResultStatus = 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'UNKNOWN_NEEDS_MANUAL_CHECK' | 'DRY_RUN_SKIPPED';

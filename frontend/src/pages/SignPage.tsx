@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { AlertCircle, RotateCcw, Play, Trash2, Users, Settings2, ListChecks, Shield, AlertTriangle } from 'lucide-react';
 import type { TaskLogEntry as ApiTaskLogEntry, TaskLogEntry } from '../api/client';
-import { submitTask, getTaskLogsById, getTaskStatus } from '../api/client';
+import { submitTask } from '../api/client';
 import { useWindowState } from '../components/shared/WindowStateProvider';
 import { useTaskExecution } from '../components/shared/TaskExecutionContext';
 import { useRuntimeMode } from '../components/shared/RuntimeModeProvider';
+import { useTaskLiveLogs } from '../hooks/useTaskLiveLogs';
 import type { ExecutionMode } from '../components/shared/ScanWorkbench';
 import type { PlaywrightSiteWindowState } from '../api/client';
 import type { Assignment } from '../lib/assignment-builder';
@@ -45,6 +46,38 @@ function formatTime(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+function renderLogLines(logs: TaskLogEntry[], isIdle: boolean, isRunning: boolean) {
+  if (logs.length === 0 && isIdle) {
+    return (
+      <div className="log-line" style={{ opacity: 0.5 }}>
+        <span className="log-ts">--:--:--</span>
+        <span className="log-lv info">INFO</span>
+        <span className="log-msg">等待启动...</span>
+      </div>
+    );
+  }
+  if (logs.length === 0 && isRunning) {
+    return (
+      <div className="log-line" style={{ opacity: 0.5 }}>
+        <span className="log-ts">--:--:--</span>
+        <span className="log-lv info">INFO</span>
+        <span className="log-msg">任务启动中...</span>
+      </div>
+    );
+  }
+  return logs.slice().reverse().map((log, idx) => {
+    const lvCls = log.level === 'error' ? 'err' : log.level === 'warning' ? 'warn' : log.level === 'success' ? 'ok' : 'info';
+    const lvText = log.level === 'warning' ? 'WARN' : log.level === 'success' ? 'OK' : log.level.toUpperCase().slice(0, 4);
+    return (
+      <div key={log.id} className={`log-line${idx === 0 ? ' latest' : ''}`}>
+        <span className="log-ts">{formatTime(log.timestamp)}</span>
+        <span className={`log-lv ${lvCls}`}>{lvText}</span>
+        <span className="log-msg">{log.message}</span>
+      </div>
+    );
+  });
+}
+
 export default function SignPage() {
   const execPanelRef = useRef<HTMLDivElement>(null);
 
@@ -77,62 +110,22 @@ export default function SignPage() {
 
   const {
     taskId, liveStatus, submitting, totalCount, doneCount, successCount, failedCount,
-    workerProgress, workerLogs, rate, eta,
+    workerProgress, rate, eta,
     selectedWorkers: ctxSelectedWorkers, allocations: ctxAllocations, taskOrigin,
-    startTask: ctxStartTask, resetTask: ctxResetTask, clearLogs: ctxClearLogs, setSubmitting: ctxSetSubmitting,
+    startTask: ctxStartTask, resetTask: ctxResetTask, setSubmitting: ctxSetSubmitting,
   } = useTaskExecution();
 
-  // ── 独立 PG 日志轮询（fallback：TaskExecutionContext 的 workerLogs 可能为空）──
-  const [livePgLogs, setLivePgLogs] = useState<TaskLogEntry[]>([]);
-  const livePgLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const livePgDoneRef = useRef(false);
-
-  useEffect(() => {
-    if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-    livePgDoneRef.current = false;
-    setLivePgLogs([]);
-    if (!taskId) return;
-
-    console.log(`[SignPage-LiveLogs] start polling taskId=${taskId}`);
-    getTaskLogsById(taskId, 200).then(data => {
-      console.log(`[SignPage-LiveLogs] initial fetch logs=${data.logs.length}`);
-      setLivePgLogs(data.logs);
-    }).catch(e => console.error('[SignPage-LiveLogs] fetch failed:', (e as Error).message));
-
-    livePgLogRef.current = setInterval(async () => {
-      if (livePgDoneRef.current) return;
-      try {
-        const data = await getTaskLogsById(taskId, 200);
-        setLivePgLogs(data.logs);
-      } catch (e) {
-        console.error('[SignPage-LiveLogs] poll failed:', (e as Error).message);
-      }
-    }, 1500);
-
-    const statusTimer = setInterval(async () => {
-      if (livePgDoneRef.current) return;
-      try {
-        const s = await getTaskStatus(taskId);
-        if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
-          livePgDoneRef.current = true;
-          console.log(`[SignPage-LiveLogs] stop polling status=${s.status}`);
-          try {
-            const data = await getTaskLogsById(taskId, 200);
-            setLivePgLogs(data.logs);
-          } catch { /* ignore */ }
-          if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-          clearInterval(statusTimer);
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-
-    return () => {
-      if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-      clearInterval(statusTimer);
-    };
-  }, [taskId]);
-
+  // ── Phase 5-G-2: 使用统一日志 Hook ──
   const SUBMIT_API = '/api/operations/sign';
+  const belongsToMe = !taskOrigin || taskOrigin === SUBMIT_API;
+  const taskActive = !!(belongsToMe && taskId && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error'));
+  const displayWorkers = taskActive && ctxSelectedWorkers.length > 0 ? ctxSelectedWorkers : selectedWorkers;
+
+  const { allLogs, logsByWorker, globalLogs, isRunning: logsIsRunning } = useTaskLiveLogs({
+    taskId: taskActive ? taskId : null,
+    enabled: taskActive,
+    workers: displayWorkers,
+  });
 
   const getWorkerPageSize = useCallback((name: string): PageSizeOption => {
     return workerPageSizes[name] ?? DEFAULT_PAGE_SIZE;
@@ -204,36 +197,10 @@ export default function SignPage() {
     return map;
   }, [assignments]);
 
-  const belongsToMe = !taskOrigin || taskOrigin === SUBMIT_API;
-  const displayWorkers = belongsToMe
-    && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error')
-    && ctxSelectedWorkers.length > 0
-    ? ctxSelectedWorkers
-    : selectedWorkers;
   const displayAllocations = belongsToMe
     && Object.keys(ctxAllocations).length > 0
     ? ctxAllocations
     : allocations;
-
-  // 聚合日志：从 Context workerLogs 计算综合日志
-  const combinedLogs = useMemo(() => {
-    const seen = new Set<string>();
-    const all: ApiTaskLogEntry[] = [];
-    for (const name of displayWorkers) {
-      for (const log of workerLogs[name] || []) {
-        if (!seen.has(log.id)) {
-          seen.add(log.id);
-          all.push(log);
-        }
-      }
-    }
-    return all.sort((a, b) => a.timestamp - b.timestamp);
-  }, [workerLogs, displayWorkers]);
-
-  useEffect(() => {
-    if (!taskId || liveStatus !== 'running') return;
-    // polling handled by TaskExecutionContext
-  }, [taskId, liveStatus]);
 
   useEffect(() => {
     if (liveStatus === 'running' && execPanelRef.current) {
@@ -348,8 +315,6 @@ export default function SignPage() {
 
   const handleReset = useCallback(() => ctxResetTask(), [ctxResetTask]);
 
-  const handleClearLogs = () => ctxClearLogs();
-
   const canStart = !taskOrigin
     && selectedWorkers.length > 0
     && !submitting
@@ -369,38 +334,6 @@ export default function SignPage() {
 
   const singleSelected = selectedWorkers.length === 1 ? selectedWorkers[0] : null;
   const pageSizeEditable = singleSelected !== null && !isRunning;
-
-  const renderLogLines = (logs: ApiTaskLogEntry[]) => {
-    if (logs.length === 0 && isIdle) {
-      return (
-        <div className="log-line" style={{ opacity: 0.5 }}>
-          <span className="log-ts">--:--:--</span>
-          <span className="log-lv info">INFO</span>
-          <span className="log-msg">等待启动...</span>
-        </div>
-      );
-    }
-    if (logs.length === 0 && isRunning) {
-      return (
-        <div className="log-line" style={{ opacity: 0.5 }}>
-          <span className="log-ts">--:--:--</span>
-          <span className="log-lv info">INFO</span>
-          <span className="log-msg">任务启动中...</span>
-        </div>
-      );
-    }
-    return logs.slice().reverse().map(log => {
-      const lvCls = log.level === 'error' ? 'err' : log.level === 'warning' ? 'warn' : 'info';
-      const lvText = log.level === 'warning' ? 'WARN' : log.level.toUpperCase().slice(0, 4);
-      return (
-        <div key={log.id} className="log-line">
-          <span className="log-ts">{formatTime(log.timestamp)}</span>
-          <span className={`log-lv ${lvCls}`}>{lvText}</span>
-          <span className="log-msg">{log.message}</span>
-        </div>
-      );
-    });
-  };
 
   return (
     <div style={{ minHeight: '100%', position: 'relative', maxWidth: '1440px', margin: '0 auto' }}>
@@ -774,7 +707,7 @@ export default function SignPage() {
           </div>
           <div className="exec-controls">
             {isRunning && (
-              <button className="btn-sm" onClick={handleClearLogs}>
+              <button className="btn-sm" onClick={handleReset}>
                 <Trash2 size={12} />
                 清空日志
               </button>
@@ -839,6 +772,32 @@ export default function SignPage() {
           </div>
         </div>
 
+        {/* Phase 5-G-2: 任务总日志卡片 */}
+        {(taskActive || displayWorkers.length === 0) && globalLogs.length > 0 && (
+          <div className="log-matrix cols-1" style={{ marginBottom: '12px' }}>
+            <div className="log-card">
+              <div className="log-card-head">
+                <div className="log-avatar" style={{ background: 'var(--text-3)' }}>
+                  <ListChecks size={12} />
+                </div>
+                <div>
+                  <div className="log-name">任务总日志</div>
+                  <div className="log-empno">全局执行信息</div>
+                </div>
+                <div className="log-progress-right">
+                  <span className="log-count"><b>{globalLogs.length}</b> 条</span>
+                </div>
+              </div>
+              <div className="log-progress-bar">
+                <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
+              </div>
+              <div className="log-body">
+                {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 日志区域：0个派件员显示综合日志；≥1个派件员显示派件员窗口日志 */}
         {displayWorkers.length === 0 ? (
           <div className="log-matrix cols-1">
@@ -848,19 +807,23 @@ export default function SignPage() {
                   <ListChecks size={12} />
                 </div>
                 <div>
-                  <div className="log-name">综合日志</div>
+                  <div className="log-name">任务总日志</div>
                   <div className="log-empno">选择派件员后显示独立窗口日志</div>
-                </div>
-                <div className="log-progress-right">
-                  <span className="log-count"><b>{combinedLogs.length}</b> 条</span>
-                  <span className="log-pct">—</span>
                 </div>
               </div>
               <div className="log-progress-bar">
                 <div className="log-progress-fill" style={{ width: '0%', background: 'var(--text-3)' }} />
               </div>
               <div className="log-body">
-                {renderLogLines(combinedLogs)}
+                {globalLogs.length > 0
+                  ? renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)
+                  : (
+                    <div className="log-line" style={{ opacity: 0.5 }}>
+                      <span className="log-ts">--:--:--</span>
+                      <span className="log-lv info">INFO</span>
+                      <span className="log-msg">请选择派件员启动任务</span>
+                    </div>
+                  )}
               </div>
             </div>
           </div>
@@ -869,11 +832,7 @@ export default function SignPage() {
             {displayWorkers.map(name => {
               const color = getWindowColor(name);
               const wp = workerProgress[name] || { done: 0, total: 1, failed: 0 };
-              // 优先用 TaskExecutionContext 的 workerLogs；为空时 fallback 到 SignPage 独立轮询的 livePgLogs
-              const ctxLogs = workerLogs[name] || [];
-              const logs = ctxLogs.length > 0
-                ? ctxLogs
-                : livePgLogs.filter(l => !l.staffName || l.staffName === name);
+              const logs = logsByWorker[name] || [];
               const pct = wp.total > 0 ? Math.round((wp.done / wp.total) * 100) : 0;
               const ps = getWorkerPageSize(name);
               return (
@@ -893,7 +852,7 @@ export default function SignPage() {
                     <div className="log-progress-fill" style={{ width: `${pct}%`, background: color }} />
                   </div>
                   <div className="log-body">
-                    {renderLogLines(logs)}
+                    {renderLogLines(logs, isIdle, isRunning || logsIsRunning)}
                   </div>
                 </div>
               );

@@ -2,12 +2,14 @@
 // 到件扫描 / 派件扫描 / 到派一体 三个页面共用此组件
 // 唯一差异：submitApi 指向后端不同的 Playwright 任务路由
 // Phase 9-dryrun: 右上角显示运行模式 Tag，真实模式隐藏"测试数据"按钮
+// Phase 5-G-2: 使用 useTaskLiveLogs 统一日志获取，SSE + PG 轮询合并
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { AlertCircle, RotateCcw, Wand2, Trash2, Shield, AlertTriangle } from 'lucide-react';
-import { submitTask, getTaskLogsById, getTaskStatus, type TaskLogEntry } from '../../api/client';
+import { AlertCircle, RotateCcw, Wand2, Trash2, Shield, AlertTriangle, ListChecks } from 'lucide-react';
+import { submitTask, type TaskLogEntry } from '../../api/client';
 import { useWindowState } from '../shared/WindowStateProvider';
 import { useTaskExecution } from '../shared/TaskExecutionContext';
 import { useRuntimeMode } from '../shared/RuntimeModeProvider';
+import { useTaskLiveLogs } from '../../hooks/useTaskLiveLogs';
 import type { PlaywrightSiteWindowState } from '../../api/client';
 import { buildAssignments } from '../../lib/assignment-builder';
 import {
@@ -80,6 +82,38 @@ function formatTime(ts: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+function renderLogLines(logs: TaskLogEntry[], isIdle: boolean, isRunning: boolean) {
+  if (logs.length === 0 && isIdle) {
+    return (
+      <div className="log-line" style={{ opacity: 0.5 }}>
+        <span className="log-ts">--:--:--</span>
+        <span className="log-lv info">INFO</span>
+        <span className="log-msg">等待启动...</span>
+      </div>
+    );
+  }
+  if (logs.length === 0 && isRunning) {
+    return (
+      <div className="log-line" style={{ opacity: 0.5 }}>
+        <span className="log-ts">--:--:--</span>
+        <span className="log-lv info">INFO</span>
+        <span className="log-msg">任务启动中...</span>
+      </div>
+    );
+  }
+  return logs.slice().reverse().map((log, idx) => {
+    const lvCls = log.level === 'error' ? 'err' : log.level === 'warning' ? 'warn' : log.level === 'success' ? 'ok' : 'info';
+    const lvText = log.level === 'warning' ? 'WARN' : log.level === 'success' ? 'OK' : log.level.toUpperCase().slice(0, 4);
+    return (
+      <div key={log.id} className={`log-line${idx === 0 ? ' latest' : ''}`}>
+        <span className="log-ts">{formatTime(log.timestamp)}</span>
+        <span className={`log-lv ${lvCls}`}>{lvText}</span>
+        <span className="log-msg">{log.message}</span>
+      </div>
+    );
+  });
+}
+
 export default function ScanWorkbench({ title, description, submitApi, hideWaybillInput = false, enableExecutionMode = false }: ScanWorkbenchProps) {
   const execPanelRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,68 +154,21 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
 
   const {
     taskId, liveStatus, submitting, totalCount, doneCount, successCount, failedCount,
-    workerProgress, workerLogs, rate, eta,
+    workerProgress, rate, eta,
     selectedWorkers: ctxSelectedWorkers, allocations: ctxAllocations, taskOrigin,
-    startTask: ctxStartTask, resetTask: ctxResetTask, clearLogs: ctxClearLogs, setSubmitting: ctxSetSubmitting,
+    startTask: ctxStartTask, resetTask: ctxResetTask, setSubmitting: ctxSetSubmitting,
   } = useTaskExecution();
 
-  // ── 独立 PG 日志轮询（fallback：TaskExecutionContext 的 workerLogs 可能为空）──
-  // taskId 存在即启动，不依赖 liveStatus，每 1.5 秒全量拉取
-  const [livePgLogs, setLivePgLogs] = useState<TaskLogEntry[]>([]);
-  const livePgLogRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const livePgDoneRef = useRef(false);
+  // ── Phase 5-G-2: 使用统一日志 Hook ──
+  const belongsToMe = !taskOrigin || taskOrigin === submitApi;
+  const taskActive = !!(belongsToMe && taskId && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error'));
+  const displayWorkers = taskActive && ctxSelectedWorkers.length > 0 ? ctxSelectedWorkers : selectedWorkers;
 
-  useEffect(() => {
-    // 清理旧轮询
-    if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-    livePgDoneRef.current = false;
-    setLivePgLogs([]);
-
-    if (!taskId) return;
-
-    console.log(`[ScanWorkbench-LiveLogs] start polling taskId=${taskId}`);
-
-    // 立即拉一次
-    getTaskLogsById(taskId, 200).then(data => {
-      console.log(`[ScanWorkbench-LiveLogs] initial fetch logs=${data.logs.length}`);
-      setLivePgLogs(data.logs);
-    }).catch(e => console.error('[ScanWorkbench-LiveLogs] fetch failed:', (e as Error).message));
-
-    // 日志轮询 1.5 秒
-    livePgLogRef.current = setInterval(async () => {
-      if (livePgDoneRef.current) return;
-      try {
-        const data = await getTaskLogsById(taskId, 200);
-        setLivePgLogs(data.logs);
-      } catch (e) {
-        console.error('[ScanWorkbench-LiveLogs] poll failed:', (e as Error).message);
-      }
-    }, 1500);
-
-    // 状态轮询 2 秒（独立判断 done）
-    const statusTimer = setInterval(async () => {
-      if (livePgDoneRef.current) return;
-      try {
-        const s = await getTaskStatus(taskId);
-        if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
-          livePgDoneRef.current = true;
-          console.log(`[ScanWorkbench-LiveLogs] stop polling status=${s.status}`);
-          // 拉最终日志
-          try {
-            const data = await getTaskLogsById(taskId, 200);
-            setLivePgLogs(data.logs);
-          } catch { /* ignore */ }
-          if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-          clearInterval(statusTimer);
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-
-    return () => {
-      if (livePgLogRef.current) { clearInterval(livePgLogRef.current); livePgLogRef.current = null; }
-      clearInterval(statusTimer);
-    };
-  }, [taskId]);
+  const { allLogs, logsByWorker, globalLogs, isRunning: logsIsRunning } = useTaskLiveLogs({
+    taskId: taskActive ? taskId : null,
+    enabled: taskActive,
+    workers: displayWorkers,
+  });
 
   const validCount = hideWaybillInput ? selectedWorkers.length : validWaybills.length;
 
@@ -259,18 +246,11 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     return map;
   }, [assignments]);
 
-  // 日志展示用：任务活跃时使用 Context 中的 selectedWorkers/allocations（跨路由持久）
-  // belongsToMe: 当前页面匹配 taskOrigin，不匹配则视为当前页面无活跃任务
-  const belongsToMe = !taskOrigin || taskOrigin === submitApi;
-  const displayWorkers = belongsToMe
-    && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error')
-    && ctxSelectedWorkers.length > 0 
-    ? ctxSelectedWorkers 
-    : selectedWorkers;
-  const displayAllocations = belongsToMe
-    && Object.keys(ctxAllocations).length > 0 
-    ? ctxAllocations 
-    : allocations;
+  const displayAllocations = taskActive && Object.keys(ctxAllocations).length > 0 ? ctxAllocations : allocations;
+  const isRunning = belongsToMe && liveStatus === 'running';
+  const isIdle = !belongsToMe || liveStatus === 'idle';
+  const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+  const colsClass = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
 
   // 运单输入防抖：waybillInput 即时更新保证输入流畅，debouncedInput 延迟 300ms 用于解析
   const handleInputChange = useCallback((value: string) => {
@@ -454,10 +434,6 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     ctxResetTask();
   }, [ctxResetTask]);
 
-  const handleClearLogs = () => {
-    ctxClearLogs();
-  };
-
   const canStart = !taskOrigin
     && selectedWorkers.length > 0
     && !submitting
@@ -467,13 +443,6 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     && (executionMode === 'default' || (
       targetCourier.trim().length > 0 && (usernameByEmployee[targetCourier] || '') !== ''
     ));
-  const isRunning = belongsToMe && liveStatus === 'running';
-  const isIdle = !belongsToMe || liveStatus === 'idle';
-  const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
-  const colsClass = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
-
-  // Phase 4-I-1: getStatusBadge / getCardClass / getAllocText 已迁移到 lib/window-status.ts
-  // 使用 getNodeBadge / getNodeCardClass / getNodeStatusText 替代
 
   return (
     <div style={{ minHeight: '100%', position: 'relative', maxWidth: '1440px', margin: '0 auto' }}>
@@ -839,7 +808,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
           </div>
           <div className="exec-controls">
             {isRunning && (
-              <button className="btn-sm" onClick={handleClearLogs}>
+              <button className="btn-sm" onClick={handleReset}>
                 <Trash2 size={12} />
                 清空日志
               </button>
@@ -904,16 +873,38 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
           </div>
         </div>
 
+        {/* Phase 5-G-2: 任务总日志卡片 */}
+        {(taskActive || displayWorkers.length === 0) && globalLogs.length > 0 && (
+          <div className="log-matrix cols-1" style={{ marginBottom: '12px' }}>
+            <div className="log-card">
+              <div className="log-card-head">
+                <div className="log-avatar" style={{ background: 'var(--text-3)' }}>
+                  <ListChecks size={12} />
+                </div>
+                <div>
+                  <div className="log-name">任务总日志</div>
+                  <div className="log-empno">全局执行信息</div>
+                </div>
+                <div className="log-progress-right">
+                  <span className="log-count"><b>{globalLogs.length}</b> 条</span>
+                </div>
+              </div>
+              <div className="log-progress-bar">
+                <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
+              </div>
+              <div className="log-body">
+                {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
+              </div>
+            </div>
+          </div>
+        )}
+
         {displayWorkers.length > 0 ? (
           <div className={`log-matrix ${colsClass}`}>
             {displayWorkers.map(name => {
               const color = getWindowColor(name);
               const wp = workerProgress[name] || { done: 0, total: displayAllocations[name] || 0, failed: 0 };
-              // 优先用 TaskExecutionContext 的 workerLogs；为空时 fallback 到 ScanWorkbench 独立轮询的 livePgLogs
-              const ctxLogs = workerLogs[name] || [];
-              const logs = ctxLogs.length > 0
-                ? ctxLogs
-                : livePgLogs.filter(l => !l.staffName || l.staffName === name);
+              const logs = logsByWorker[name] || [];
               const pct = wp.total > 0 ? Math.round((wp.done / wp.total) * 100) : 0;
               return (
                 <div key={name} className="log-card">
@@ -932,31 +923,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                     <div className="log-progress-fill" style={{ width: `${pct}%`, background: color }} />
                   </div>
                   <div className="log-body">
-                    {logs.slice().reverse().map((log, idx) => {
-                      const lvCls = log.level === 'error' ? 'err' : log.level === 'warning' ? 'warn' : 'info';
-                      const lvText = log.level === 'warning' ? 'WARN' : log.level.toUpperCase().slice(0, 4);
-                      return (
-                        <div key={log.id} className={`log-line${idx === 0 ? ' latest' : ''}`}>
-                          <span className="log-ts">{formatTime(log.timestamp)}</span>
-                          <span className={`log-lv ${lvCls}`}>{lvText}</span>
-                          <span className="log-msg">{log.message}</span>
-                        </div>
-                      );
-                    })}
-                    {logs.length === 0 && isIdle && (
-                      <div className="log-line" style={{ opacity: 0.5 }}>
-                        <span className="log-ts">--:--:--</span>
-                        <span className="log-lv info">INFO</span>
-                        <span className="log-msg">等待启动...</span>
-                      </div>
-                    )}
-                    {logs.length === 0 && isRunning && (
-                      <div className="log-line" style={{ opacity: 0.5 }}>
-                        <span className="log-ts">--:--:--</span>
-                        <span className="log-lv info">INFO</span>
-                        <span className="log-msg">任务启动中...</span>
-                      </div>
-                    )}
+                    {renderLogLines(logs, isIdle, isRunning || logsIsRunning)}
                   </div>
                 </div>
               );
@@ -972,7 +939,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                   </svg>
                 </div>
                 <div>
-                  <div className="log-name">统合日志</div>
+                  <div className="log-name">任务总日志</div>
                   <div className="log-empno">选择节点后显示分窗口日志</div>
                 </div>
               </div>
@@ -980,11 +947,15 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                 <div className="log-progress-fill" style={{ width: '0%', background: 'var(--text-3)' }} />
               </div>
               <div className="log-body">
-                <div className="log-line" style={{ opacity: 0.5 }}>
-                  <span className="log-ts">--:--:--</span>
-                  <span className="log-lv info">INFO</span>
-                  <span className="log-msg">请先录入运单号并选择执行窗口</span>
-                </div>
+                {globalLogs.length > 0
+                  ? renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)
+                  : (
+                    <div className="log-line" style={{ opacity: 0.5 }}>
+                      <span className="log-ts">--:--:--</span>
+                      <span className="log-lv info">INFO</span>
+                      <span className="log-msg">请先录入运单号并选择执行窗口</span>
+                    </div>
+                  )}
               </div>
             </div>
           </div>

@@ -1692,11 +1692,11 @@ router.get('/api/tasks/:id/status', async (req: Request, res: Response) => {
   }
 });
 
-/** GET /api/tasks/:id/logs — 查询任务执行日志（从 PG task_logs 表） */
+/** GET /api/tasks/:id/logs — 查询任务执行日志（从 PG task_logs 表，Phase 5-G-2: 默认 limit 500） */
 router.get('/api/tasks/:id/logs', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const limit = parseInt(req.query.limit as string) || 100;
+    const limit = parseInt(req.query.limit as string) || 500;
     const offset = parseInt(req.query.offset as string) || 0;
 
     const pgDb = PgDatabase.getInstance();

@@ -8,13 +8,14 @@ export interface TaskLogEntry {
   id: string;
   taskId: string;
   timestamp: number;
-  level: 'info' | 'warning' | 'error';
+  level: 'info' | 'success' | 'warning' | 'error';
   message: string;
   source: string;
   /** 结构化窗口追踪：员工姓名（Worker Window 标识，admin 角色冻结后统一为员工姓名） */
   staffName?: string;
   /** 结构化窗口追踪：窗口ID */
   windowId?: string;
+  workstationId?: string;
 }
 
 const MAX_LOGS_PER_TASK = 500;
@@ -67,7 +68,7 @@ export class TaskLogManager {
 
   addLog(
     taskId: string,
-    level: 'info' | 'warning' | 'error',
+    level: 'info' | 'success' | 'warning' | 'error',
     message: string,
     source: string,
     context?: LogContext,

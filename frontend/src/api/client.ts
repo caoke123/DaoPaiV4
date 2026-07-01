@@ -95,7 +95,7 @@ export type TaskType = 'arrive' | 'arrival' | 'dispatch' | 'sign' | 'integrated'
 export type WindowRole = 'admin' | 'staff';
 
 /** 日志级别 */
-export type LogLevel = 'info' | 'warning' | 'error';
+export type LogLevel = 'info' | 'success' | 'warning' | 'error';
 
 /** 运单结果详细状态 */
 export type WaybillResultStatus = 'SUCCESS' | 'PARTIAL' | 'FAILED' | 'UNKNOWN_NEEDS_MANUAL_CHECK' | 'DRY_RUN_SKIPPED';
@@ -354,7 +354,7 @@ export async function getTaskProgress(taskId: string): Promise<TaskProgress> {
 }
 
 /** 查询任务执行日志 */
-export async function getTaskLogs(taskId: string, limit = 100): Promise<TaskLogEntry[]> {
+export async function getTaskLogs(taskId: string, limit = 500): Promise<TaskLogEntry[]> {
   const resp = await fetchWithAuth(`${BASE}/operations/${taskId}/logs?limit=${limit}`);
   if (!resp.ok) throw new Error(`查询任务日志失败: HTTP ${resp.status}`);
   const data = await resp.json();
@@ -546,10 +546,10 @@ export async function updateSettingsConfig(sites: SiteConfig[]): Promise<{ ok: b
 
 // ── 任务详情 API（基于 PgDatabase） ──
 
-/** 查询任务执行日志（从 PG task_logs 表） */
+/** 查询任务执行日志（从 PG task_logs 表，Phase 5-G-2: 默认 limit 500） */
 export async function getTaskLogsById(
   taskId: string,
-  limit = 100,
+  limit = 500,
   offset = 0,
 ): Promise<TaskLogsResponse> {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });

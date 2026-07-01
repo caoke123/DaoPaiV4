@@ -296,8 +296,10 @@ function TaskDetailDrawer({
   const loadLogs = useCallback(async () => {
     setLogsLoading(true);
     try {
-      const data = await getTaskLogsById(task.id, 200);
-      setLogs(data.logs);
+      const data = await getTaskLogsById(task.id, 500);
+      // 按 timestamp ASC 排序，确保时间正序
+      const sortedLogs = [...data.logs].sort((a, b) => a.timestamp - b.timestamp);
+      setLogs(sortedLogs);
       setLogsTotal(data.total);
     } catch {
       setLogs([]);
