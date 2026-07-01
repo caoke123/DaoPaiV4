@@ -333,6 +333,11 @@ export class AssignmentEngine {
       }
     };
 
+    // Phase 5-G-4: 定期冲刷 PG 日志缓冲（每 2 秒），确保员工连接准备阶段日志实时可见
+    const pgFlushTimer = setInterval(() => {
+      flushPgLogs().catch(() => {});
+    }, 2000);
+
     // Phase G-3: 创建 AbortController，存入 Map
     const abortController = new AbortController();
     this.cancelControllers.set(taskId, abortController);
@@ -640,6 +645,7 @@ export class AssignmentEngine {
           handlerTimeoutMs,
           abortController.signal,
           pgLogBuffer,
+          flushPgLogs,
         );
       }));
 
@@ -799,6 +805,8 @@ export class AssignmentEngine {
     } finally {
       // Phase G-3: 【内存泄漏防护】任务彻底结束后，从 Map 中移除
       this.cancelControllers.delete(taskId);
+      // Phase 5-G-4: 清理 PG 日志定期冲刷定时器
+      clearInterval(pgFlushTimer);
     }
   }
 
@@ -824,6 +832,7 @@ export class AssignmentEngine {
     timeoutMs: number,
     signal: AbortSignal,
     pgLogBuffer: TaskLogEntry[],
+    flushPgLogs: () => Promise<void>,
   ): Promise<void> {
     const { taskId } = taskContext;
     const { staffName } = assignment;
@@ -866,6 +875,9 @@ export class AssignmentEngine {
         `Worker connection established: runtimeMode=${conn.runtimeMode} windowId=${conn.windowId}` +
         (conn.runtimeKey ? ` runtimeKey=${conn.runtimeKey}` : ''),
       );
+
+      // Phase 5-G-4: 连接阶段完成后立即冲刷日志到 PG，确保前端实时可见
+      await flushPgLogs();
 
       // Phase 2-B: 指定模式日志摘要
       if (assignment.executionMode === 'designated') {
@@ -971,6 +983,8 @@ export class AssignmentEngine {
         source: 'Engine',
         staffName,
       });
+      // Phase 5-G-4: 失败后立即冲刷日志，确保前端实时可见
+      await flushPgLogs();
     }
   }
 
