@@ -12,6 +12,49 @@
 import { createContext, useContext, useState, useRef, useEffect, useCallback, type ReactNode } from 'react';
 import { getTaskProgress, getTaskStatus, type WaybillResult } from '../../api/client';
 
+// ── Phase 5-G-7: localStorage 任务持久化 ──
+const LS_PREFIX = 'daopai_task_';
+
+interface PersistedTask {
+  taskId: string;
+  taskOrigin: string;
+  selectedWorkers: string[];
+  allocations: Allocations;
+  liveStatus: LiveStatus;
+  totalCount: number;
+  doneCount: number;
+  successCount: number;
+  failedCount: number;
+  savedAt: number;
+}
+
+function persistTask(task: PersistedTask): void {
+  const key = `${LS_PREFIX}${normalizeOriginKey(task.taskOrigin)}`;
+  try {
+    localStorage.setItem(key, JSON.stringify(task));
+  } catch { /* quota exceeded */ }
+}
+
+function loadPersistedTask(originKey: string): PersistedTask | null {
+  const key = `${LS_PREFIX}${originKey}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw) as PersistedTask;
+  } catch { return null; }
+}
+
+function clearPersistedTask(originKey: string): void {
+  const key = `${LS_PREFIX}${originKey}`;
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
+}
+
+/** 将 taskOrigin 如 /api/operations/integrated 标准化为 integrated */
+function normalizeOriginKey(origin: string): string {
+  const parts = origin.split('/');
+  return parts[parts.length - 1] || origin;
+}
+
 // ── 类型 ──
 
 export interface WorkerProgress {
@@ -78,6 +121,7 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
   const selectedWorkersRef = useRef<string[]>([]);
   const allocationsRef = useRef<Allocations>({});
   const isCompletedRef = useRef(false);
+  const taskOriginRef = useRef<string | null>(null);
 
   const pgStatusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pgCompletedRef = useRef(false);
@@ -357,6 +401,7 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
     setSelectedWorkers(workers);
     setAllocations(allocs);
     setTaskOrigin(origin);
+    taskOriginRef.current = origin;
     setTaskId(tid);
     setLiveStatus('running');
     setWorkerProgress({});
@@ -370,6 +415,20 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
     startTimeRef.current = null;
     isCompletedRef.current = false;
     pgCompletedRef.current = false;
+
+    // Phase 5-G-7: 持久化到 localStorage，支持页面切换恢复
+    persistTask({
+      taskId: tid,
+      taskOrigin: origin,
+      selectedWorkers: workers,
+      allocations: allocs,
+      liveStatus: 'running',
+      totalCount: 0,
+      doneCount: 0,
+      successCount: 0,
+      failedCount: 0,
+      savedAt: Date.now(),
+    });
   }, []);
 
   const resetTask = useCallback(() => {
@@ -385,6 +444,12 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
       clearInterval(pgStatusPollRef.current);
       pgStatusPollRef.current = null;
     }
+    // Phase 5-G-7: 清除 localStorage 任务持久化
+    const currentOrigin = taskOriginRef.current;
+    if (currentOrigin) {
+      clearPersistedTask(normalizeOriginKey(currentOrigin));
+    }
+    taskOriginRef.current = null;
     selectedWorkersRef.current = [];
     allocationsRef.current = {};
     setSelectedWorkers([]);

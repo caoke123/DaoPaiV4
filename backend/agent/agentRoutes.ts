@@ -187,11 +187,15 @@ agentRouter.post('/tasks/pull', async (req: Request, res: Response) => {
 
 /** POST /agent/tasks/:id/run-engine — 使用业务页员工窗口执行已拉取任务 */
 agentRouter.post('/tasks/:id/run-engine', async (req: Request, res: Response) => {
+  const tEntry = Date.now();
   try {
     const { tenantId, workstationId } = getAgentPrincipal(req);
     const taskId = req.params.id;
+    console.log(`[run-engine] T5 收到请求: taskId=${taskId} t=${tEntry}`);
+
     const pg = PgDatabase.getInstance();
     const task = await pg.getTaskById(tenantId, taskId);
+    console.log(`[run-engine] getTaskById 耗时 ${Date.now() - tEntry}ms taskId=${taskId}`);
 
     if (!task) {
       return res.status(404).json({
@@ -250,6 +254,9 @@ agentRouter.post('/tasks/:id/run-engine', async (req: Request, res: Response) =>
       source: 'agent-engine',
     });
 
+    console.time(`Engine-execute-${taskId}`);
+    console.log(`[run-engine] T6 Engine.execute 开始: taskId=${taskId} 距入口 ${Date.now() - tEntry}ms`);
+
     await AssignmentEngine.getInstance().execute({
       taskId,
       site: task.site as Site,
@@ -258,6 +265,9 @@ agentRouter.post('/tasks/:id/run-engine', async (req: Request, res: Response) =>
       waybillNos,
       handler: selected.handler,
     });
+
+    console.timeEnd(`Engine-execute-${taskId}`);
+    console.log(`[run-engine] Engine.execute 完成: taskId=${taskId} 总耗时 ${Date.now() - tEntry}ms`);
 
     res.json({
       ok: true,

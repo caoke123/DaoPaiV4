@@ -286,11 +286,13 @@ export class AssignmentEngine {
    *   - 调用 engine.execute()（异步执行，不 await）
    */
   async execute(options: EngineExecuteOptions): Promise<void> {
+    const tEngineStart = Date.now();
     const {
       taskId, site, taskType, assignments: initialAssignments, handler,
       handlerTimeoutMs = DEFAULT_HANDLER_TIMEOUT_MS,
       waybillNos,
     } = options;
+    console.log(`[Engine.execute] T6 开始: taskId=${taskId} type=${taskType} assignments=${initialAssignments.length} workers=${initialAssignments.map(a => a.staffName).join(',')}`);
     const db = Database.getInstance();
     const pool = BrowserPool.getInstance();
 

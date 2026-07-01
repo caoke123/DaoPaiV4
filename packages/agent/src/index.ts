@@ -124,12 +124,17 @@ async function executeBusinessTaskWithBackendEngine(
   task: { taskId: string; type: string; siteId: string; payload: Record<string, unknown> },
 ): Promise<void> {
   logBusinessTaskPayload(task);
+  const label = `Agent-run-engine-${task.taskId}`;
+  console.time(label);
   await uploadLogs(client, task.taskId, [{
     level: 'info',
     message: `Agent 收到业务任务，移交后端员工窗口引擎执行：type=${task.type}`,
     timestamp: new Date().toISOString(),
   }]);
+  console.time(`Agent-run-engine-POST-${task.taskId}`);
   await runTaskWithBackendEngine(client, task.taskId);
+  console.timeEnd(`Agent-run-engine-POST-${task.taskId}`);
+  console.timeEnd(label);
 }
 
 async function main(): Promise<void> {
@@ -181,6 +186,8 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log(`心跳循环已启动，每 ${(config.heartbeatIntervalMs / 1000).toFixed(0)} 秒上报一次...`);
+  console.log(`  heartbeatIntervalMs=${config.heartbeatIntervalMs}`);
+  console.log(`  taskPollIntervalMs=${config.taskPollIntervalMs}`);
   console.log('按 Ctrl+C 停止\n');
   logger.info('心跳循环已启动');
 
@@ -204,9 +211,12 @@ async function main(): Promise<void> {
       // 如果有任务且当前没有在执行，拉取任务
       if (resp.hasTask && !runningTaskId) {
         try {
+          const pullStart = Date.now();
           const pullResp = await pullTask(client);
+          console.log(`[Agent] pullTask 耗时 ${Date.now() - pullStart}ms, hasTask=${pullResp.hasTask}`);
           if (pullResp.hasTask && pullResp.task) {
             const task = pullResp.task;
+            console.log(`[Agent] T3 拉到任务: taskId=${task.taskId} type=${task.type} siteId=${task.siteId}`);
 
             // agent_test 任务
             if (task.type === 'agent_test') {

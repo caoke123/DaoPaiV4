@@ -240,6 +240,13 @@ export default function SignPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSiteId]);
 
+  // Phase 5-G-7: 页面挂载时从 context 恢复活跃任务状态
+  useEffect(() => {
+    if (taskActive && ctxSelectedWorkers.length > 0 && selectedWorkers.length === 0) {
+      setSelectedWorkers([...ctxSelectedWorkers]);
+    }
+  }, [taskActive, ctxSelectedWorkers, selectedWorkers.length]);
+
   const toggleWorker = useCallback((name: string, displayStatus: DisplayStatus) => {
     if (liveStatus === 'running') return;
     if (!canSelectAsExecutionWindow(displayStatus)) return;

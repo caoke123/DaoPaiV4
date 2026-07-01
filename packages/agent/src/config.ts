@@ -14,8 +14,8 @@ const CONFIG_EXAMPLE = path.resolve(__dirname, '..', 'agent.example.json');
 /** 默认配置 */
 const DEFAULTS: Partial<AgentConfig> = {
   logLevel: 'info',
-  heartbeatIntervalMs: 3000,
-  taskPollIntervalMs: 3000,
+  heartbeatIntervalMs: 1000,
+  taskPollIntervalMs: 1000,
 };
 
 /**
