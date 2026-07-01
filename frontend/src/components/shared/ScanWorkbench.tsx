@@ -270,12 +270,6 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const colsClass = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
 
-  useEffect(() => {
-    if (liveStatus === 'error' || globalLogs.some(log => log.level === 'error')) {
-      setDiagnosticExpanded(true);
-    }
-  }, [liveStatus, globalLogs]);
-
   // 运单输入防抖：waybillInput 即时更新保证输入流畅，debouncedInput 延迟 300ms 用于解析
   const handleInputChange = useCallback((value: string) => {
     setWaybillInput(value);

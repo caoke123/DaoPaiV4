@@ -28,6 +28,15 @@ export class IntegratedHandler implements TaskHandler {
     onProgress(results.length, results);
 
     const failed = results.filter(r => !r.success).length;
+    const successCount = results.length - failed;
+
+    // Phase 5-G-6: 写员工级最终成功/失败汇总日志
+    if (failed === 0) {
+      ctx.log('info', `到派一体完成: 成功${successCount}条, 失败${failed}条`);
+    } else {
+      ctx.log('error', `到派一体完成: 成功${successCount}条, 失败${failed}条`);
+    }
+
     return {
       success: failed === 0,
       processed: results.length,

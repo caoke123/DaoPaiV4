@@ -836,22 +836,30 @@ export class AssignmentEngine {
   ): Promise<void> {
     const { taskId } = taskContext;
     const { staffName } = assignment;
+    const t0 = Date.now();
 
-    try {
-      // Phase 5-G-5: 连接前先写日志并立即 flush，前端可见"正在连接员工窗口..."
+    // Phase 5-G-6: 辅助函数 — 向 pgLogBuffer 写入员工级日志（staffLog 尚未创建时使用）
+    const pushStaffLog = (msg: string, level: 'info' | 'warning' | 'error' = 'info', windowId?: string) => {
       pgLogBuffer.push({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        taskId, timestamp: Date.now(), level: 'info',
-        message: `正在连接员工窗口...`,
+        taskId, timestamp: Date.now(), level,
+        message: msg,
         source: taskContext.taskType,
-        staffName: staffName,
+        staffName,
+        ...(windowId ? { windowId } : {}),
       });
+    };
+
+    try {
+      // Phase 5-G-6: 记录 assignment 接收 + 运单数
+      pushStaffLog(`assignment received: waybillNos=${assignment.waybillNos.length}条, mode=${assignment.executionMode || 'default'}`);
+
+      // Phase 5-G-5: 连接前先写日志并立即 flush，前端可见"正在连接员工窗口..."
+      pushStaffLog(`开始获取窗口连接...`);
       await flushPgLogs();
 
+      const connStart = Date.now();
       // ★ Phase 2-D: 统一通过 resolveWorkerConnection 获取窗口连接
-      //   - legacy 路径：pool.getStaffConnection + acquireWindowLease + ensureWindowReady
-      //   - playwright 路径：adapter.ensureWindowReady + lockManager.acquire + adapter.markBusy + getWorkerPage
-      // 两条路径返回统一的 WorkerConnectionHandle，后续逻辑无感知
       const conn = await this.resolveWorkerConnection({
         staffName,
         site: taskContext.site,
@@ -859,13 +867,13 @@ export class AssignmentEngine {
         taskType: taskContext.taskType,
         pool,
       });
+      const connElapsed = Date.now() - connStart;
 
       // 2. 创建 staffLog（带 staffName+windowId 上下文）
       const staffLog: LogFn = (level, msg, context) => {
         taskLogManager.addLog(taskId, level, msg, `${taskContext.taskType}`,
           { staffName, windowId: conn.windowId, ...context },
         );
-        // ★ PG: 日志入缓冲（攒批写入）
         pgLogBuffer.push({
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           taskId,
@@ -880,9 +888,9 @@ export class AssignmentEngine {
         console[consoleMethod](`[${taskContext.taskType}][${staffName}] ${msg}`);
       };
 
-      // ★ Phase 2-D: 记录连接获取结果
+      // Phase 5-G-6: 记录窗口连接耗时
       staffLog('info',
-        `Worker connection established: runtimeMode=${conn.runtimeMode} windowId=${conn.windowId}` +
+        `窗口连接已就绪，耗时 ${connElapsed}ms: runtimeMode=${conn.runtimeMode} windowId=${conn.windowId}` +
         (conn.runtimeKey ? ` runtimeKey=${conn.runtimeKey}` : ''),
       );
 
@@ -900,14 +908,19 @@ export class AssignmentEngine {
         staffLog('info', designatedLog);
       }
 
-      // 3. busy 续租定时器 + handler 执行（带硬超时 + AbortSignal）
-      // ★ P0-3C: busy 续租定时器（声明提升到 try 外，确保 finally 可访问）
+      // Phase 5-G-6: assignment 级超时定时器（90s，捕获 handler 内部卡死）
+      let assignmentTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      const ASSIGNMENT_TIMEOUT_MS = 90_000;
+      const assignmentTimeout = new Promise<never>((_, reject) => {
+        assignmentTimeoutId = setTimeout(() => {
+          reject(new Error(`执行超时：员工 ${staffName} 任务超过 ${ASSIGNMENT_TIMEOUT_MS / 1000}s 未完成`));
+        }, ASSIGNMENT_TIMEOUT_MS);
+      });
+
+      // 3. busy 续租定时器 + handler 执行
       let busyRenewalTimer: ReturnType<typeof setInterval> | null = null;
       let timeoutHandle: { promise: Promise<never>; clear: () => void } | null = null;
       try {
-        // ★ P0-3C: 每 60s 续租，防止长任务被误判
-        //   - legacy: lease.renew()
-        //   - playwright: adapter.markBusy（幂等重置）
         busyRenewalTimer = setInterval(() => {
           const renewResult = conn.renew?.();
           if (renewResult instanceof Promise) {
@@ -917,7 +930,6 @@ export class AssignmentEngine {
           }
         }, 60_000);
 
-        // 4. 调用 handler（Phase G-3: 带硬超时 + AbortSignal）
         const workerCtx = {
           staffName,
           windowId: conn.windowId,
@@ -927,34 +939,58 @@ export class AssignmentEngine {
           runtimeMode: conn.runtimeMode,
         };
 
-        // Phase 5-G-5: 执行前先写日志并 flush，确保前端看到"开始执行业务操作"
-        staffLog('info', `员工窗口已就绪，开始执行业务操作...`);
+        // Phase 5-G-5: 执行前先写日志并 flush
+        staffLog('info', `开始执行业务操作...`);
         await flushPgLogs();
 
+        const execStart = Date.now();
+
         // Phase G-3: Promise.race 竞速
-        // - handler.executeWorker → 正常完成
-        // - createTimeoutPromise → 硬超时（handlerTimeoutMs）
-        // - createAbortPromise  → AbortController 触发（cancel / idle超时 / 绝对上限）
+        // Phase 5-G-6: 加入 assignment 级超时（90s）
         timeoutHandle = createTimeoutPromise(timeoutMs, `${taskContext.taskType}/${staffName}`);
         await Promise.race([
           handler.executeWorker(workerCtx, assignment, taskContext, onProgress),
           timeoutHandle.promise,
           createAbortPromise(signal),
+          assignmentTimeout,
         ]);
+
+        const execElapsed = Date.now() - execStart;
+
+        // Phase 5-G-6: handler 正常完成后写最终成功日志
+        staffLog('info', `执行业务操作完成，耗时 ${execElapsed}ms`);
+        await flushPgLogs();
       } catch (raceErr) {
-        // Phase G-3: AbortError → 任务被取消，静默返回，不创建 failResults
+        // Phase G-3: AbortError → 任务被取消，静默返回
         if (isAbortError(raceErr)) {
           staffLog('warning', `[CANCELLED] 任务已取消, worker=${staffName}`);
+          await flushPgLogs();
           return;
         }
         if (raceErr instanceof WindowBusyError) {
           staffLog('error', `[LOCK] window busy windowId=${conn.windowId} task=${taskId}`);
+          await flushPgLogs();
+        }
+        // Phase 5-G-6: assignment 超时 → 写员工级失败日志
+        const errMsg = (raceErr as Error).message;
+        if (errMsg.includes('执行超时') || errMsg.includes('未完成')) {
+          staffLog('error', `${errMsg}`);
+          await flushPgLogs();
+          // 为该员工所有运单生成失败结果
+          const timeoutResults: OperationResult[] = assignment.waybillNos.map(no => ({
+            waybillNo: no,
+            staffName,
+            success: false,
+            message: errMsg,
+            timestamp: Date.now(),
+            status: 'FAILED' as const,
+          }));
+          onProgress(timeoutResults.length, timeoutResults);
+          return; // 不向外抛出，避免影响其他 Assignment
         }
         throw raceErr;
       } finally {
-        // Phase G-3 / Phase 2-D: ★ 强制释放连接 + 清理定时器（无论何种路径都执行）★
-        //   - legacy: lease.release()（内含 lock 释放 + busy 清除）
-        //   - playwright: adapter.markReady() → lockManager.release()（先 markReady 后 release lock）
+        if (assignmentTimeoutId) clearTimeout(assignmentTimeoutId);
         if (busyRenewalTimer) clearInterval(busyRenewalTimer);
         if (timeoutHandle) timeoutHandle.clear();
         try {
@@ -963,13 +999,18 @@ export class AssignmentEngine {
           staffLog('warning', `连接释放失败: ${(releaseErr as Error).message}`);
         }
       }
+
+      // Phase 5-G-6: 最终耗时日志
+      const totalElapsed = Date.now() - t0;
+      staffLog('info', `assignment 完成，总耗时 ${totalElapsed}ms`);
+      await flushPgLogs();
     } catch (err) {
       // Phase G-3: 再检查一次 — 如果信号已 abort，不创建 failResults
       if (signal.aborted) {
         return;
       }
 
-      // Assignment 级失败：该员工所有运单标记失败，不影响其他 Assignment
+      const totalElapsed = Date.now() - t0;
       const isLockError = err instanceof WindowBusyError;
       const failResults: OperationResult[] = assignment.waybillNos.map(no => ({
         waybillNo: no,
@@ -982,22 +1023,11 @@ export class AssignmentEngine {
         status: 'FAILED',
       }));
       onProgress(failResults.length, failResults);
-      taskLogManager.addLog(taskId, 'error',
-        `[员工:${staffName}] ${isLockError ? '窗口被占用' : '执行失败'}: ${(err as Error).message}`,
-        'Engine',
-        { staffName },
+      // Phase 5-G-6: 写员工级失败日志（含耗时和失败原因）
+      pushStaffLog(
+        `assignment 失败，耗时 ${totalElapsed}ms: ${isLockError ? '窗口被占用' : '执行失败'} — ${(err as Error).message}`,
+        'error',
       );
-      // ★ PG: 失败日志入缓冲
-      pgLogBuffer.push({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        taskId,
-        timestamp: Date.now(),
-        level: 'error',
-        message: `[员工:${staffName}] ${isLockError ? '窗口被占用' : '执行失败'}: ${(err as Error).message}`,
-        source: 'Engine',
-        staffName,
-      });
-      // Phase 5-G-4: 失败后立即冲刷日志，确保前端实时可见
       await flushPgLogs();
     }
   }

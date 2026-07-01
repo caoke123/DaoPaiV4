@@ -345,12 +345,6 @@ export default function SignPage() {
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const logCols = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
 
-  useEffect(() => {
-    if (liveStatus === 'error' || globalLogs.some(log => log.level === 'error')) {
-      setDiagnosticExpanded(true);
-    }
-  }, [liveStatus, globalLogs]);
-
   // Phase 4-I-1: getStatusBadge / getCardClass 已迁移到 lib/window-status.ts
 
   const singleSelected = selectedWorkers.length === 1 ? selectedWorkers[0] : null;
