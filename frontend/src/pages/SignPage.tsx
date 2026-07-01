@@ -772,8 +772,8 @@ export default function SignPage() {
           </div>
         </div>
 
-        {/* Phase 5-G-2: 任务总日志卡片 */}
-        {(taskActive || displayWorkers.length === 0) && globalLogs.length > 0 && (
+        {/* Phase 5-G-2: 任务总日志卡片 — taskActive 时始终显示，即使日志还没到也显示"任务启动中..." */}
+        {taskActive && (
           <div className="log-matrix cols-1" style={{ marginBottom: '12px' }}>
             <div className="log-card">
               <div className="log-card-head">
