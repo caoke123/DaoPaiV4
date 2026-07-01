@@ -31,6 +31,7 @@ interface DispatchTask {
   siteId: string;
   payload: {
     waybills: string[];
+    assignments?: Array<{ waybillNos?: string[] }>;
     options?: {
       courierName?: string;
     };
@@ -55,7 +56,9 @@ export async function executeDispatchDryRun(
   config?: AgentConfig,
 ): Promise<void> {
   const { taskId, siteId, payload } = task;
-  const waybills = payload.waybills || [];
+  // Phase 5-G-3-2: 兼容 assignments 结构（后端存储 assignments[].waybillNos）
+  const waybills = payload.waybills ||
+    (payload.assignments || []).flatMap(a => a.waybillNos || []);
   const siteName = payload.siteName || await settingsLoader.getSiteName(siteId);
 
   // 校验 dryRun
@@ -239,7 +242,7 @@ export async function executeDispatchDryRun(
     } catch {
       // 忽略 fail 失败
     }
-    throw err;
+    return;
 
   } finally {
     await logger.close();

@@ -258,6 +258,7 @@ export interface TaskListResponse {
 /** POST /api/operations/* 响应 */
 export interface TaskSubmitResponse {
   taskId: string;
+  id?: string;
   status: 'pending';
 }
 
@@ -448,7 +449,12 @@ export async function submitTask(
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.message || err.error || `HTTP ${resp.status}`);
   }
-  return resp.json();
+  const data = await resp.json();
+  const taskId = data.taskId || data.id;
+  if (!taskId) {
+    throw new Error('任务创建成功但后端未返回 taskId');
+  }
+  return { ...data, taskId };
 }
 
 /** 提交派件扫描任务（多员工并发） */

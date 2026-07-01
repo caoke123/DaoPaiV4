@@ -14,7 +14,7 @@
  */
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { getTaskLogsById, getTaskStatus, type TaskLogEntry, type TaskStatus } from '../api/client';
+import { getTaskLogs, getTaskLogsById, getTaskStatus, type TaskLogEntry, type TaskStatus } from '../api/client';
 
 interface SseTaskLogEvent {
   type: 'TASK_LOG';
@@ -103,9 +103,15 @@ export function useTaskLiveLogs(options: UseTaskLiveLogsOptions): UseTaskLiveLog
     try {
       await new Promise(resolve => setTimeout(resolve, 1200));
       const data = await getTaskLogsById(tid, 500);
-      upsertLogs(data.logs);
+      if (data.logs.length > 0) {
+        upsertLogs(data.logs);
+      } else {
+        const legacyLogs = await getTaskLogs(tid, 500).catch(() => []);
+        upsertLogs(legacyLogs);
+      }
     } catch {
-      // ignore
+      const legacyLogs = await getTaskLogs(tid, 500).catch(() => []);
+      upsertLogs(legacyLogs);
     }
   }, [upsertLogs]);
 
@@ -146,9 +152,17 @@ export function useTaskLiveLogs(options: UseTaskLiveLogsOptions): UseTaskLiveLog
     logsMapRef.current = new Map();
     setStatus('pending');
 
-    getTaskLogsById(taskId, 500).then(data => {
-      upsertLogs(data.logs);
-    }).catch(() => {});
+    getTaskLogsById(taskId, 500).then(async data => {
+      if (data.logs.length > 0) {
+        upsertLogs(data.logs);
+      } else {
+        const legacyLogs = await getTaskLogs(taskId, 500).catch(() => []);
+        upsertLogs(legacyLogs);
+      }
+    }).catch(async () => {
+      const legacyLogs = await getTaskLogs(taskId, 500).catch(() => []);
+      upsertLogs(legacyLogs);
+    });
 
     getTaskStatus(taskId).then(s => {
       setStatus(s.status);
@@ -198,9 +212,15 @@ export function useTaskLiveLogs(options: UseTaskLiveLogsOptions): UseTaskLiveLog
       if (stoppedRef.current) return;
       try {
         const data = await getTaskLogsById(taskId, 500);
-        upsertLogs(data.logs);
+        if (data.logs.length > 0) {
+          upsertLogs(data.logs);
+        } else {
+          const legacyLogs = await getTaskLogs(taskId, 500).catch(() => []);
+          upsertLogs(legacyLogs);
+        }
       } catch {
-        // ignore
+        const legacyLogs = await getTaskLogs(taskId, 500).catch(() => []);
+        upsertLogs(legacyLogs);
       }
     }, pollIntervalMs);
 

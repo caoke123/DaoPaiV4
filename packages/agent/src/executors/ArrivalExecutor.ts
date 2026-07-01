@@ -30,6 +30,7 @@ interface ArrivalTask {
   siteId: string;
   payload: {
     waybills: string[];
+    assignments?: Array<{ waybillNos?: string[] }>;
     options?: {
       batchSize?: number;
       prevStation?: string;
@@ -54,7 +55,8 @@ export async function executeArrivalDryRun(
   config?: AgentConfig,
 ): Promise<void> {
   const { taskId, siteId, payload } = task;
-  const waybills = payload.waybills || [];
+  const waybills = payload.waybills ||
+    (payload.assignments || []).flatMap(a => a.waybillNos || []);
   const siteName = payload.siteName || await settingsLoader.getSiteName(siteId);
 
   // 校验 dryRun
@@ -83,7 +85,8 @@ async function executeBrowserDryRun(
   config?: AgentConfig,
 ): Promise<void> {
   const { taskId, siteId, payload } = task;
-  const waybills = payload.waybills || [];
+  const waybills = payload.waybills ||
+    (payload.assignments || []).flatMap(a => a.waybillNos || []);
   const siteName = payload.siteName || await settingsLoader.getSiteName(siteId);
   const prevStation = payload.options?.prevStation || '天津分拨中心';
 
@@ -242,7 +245,7 @@ async function executeBrowserDryRun(
     } catch {
       // 忽略 fail 失败
     }
-    throw err;
+    return;
 
   } finally {
     await logger.close();
@@ -259,7 +262,8 @@ async function executeSimulatedDryRun(
   settingsLoader: AgentSettingsLoader,
 ): Promise<void> {
   const { taskId, siteId, payload } = task;
-  const waybills = payload.waybills || [];
+  const waybills = payload.waybills ||
+    (payload.assignments || []).flatMap(a => a.waybillNos || []);
   const batchSize = payload.options?.batchSize || 200;
   const siteName = payload.siteName || await settingsLoader.getSiteName(siteId);
 
@@ -325,7 +329,7 @@ async function executeSimulatedDryRun(
     } catch {
       // 忽略 fail 失败
     }
-    throw err;
+    return;
   } finally {
     await logger.close();
   }

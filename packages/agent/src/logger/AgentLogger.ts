@@ -93,7 +93,11 @@ export class AgentLogger {
 
   async flush(): Promise<void> {
     if (this.flushing || this.closed || this.buffer.length === 0) return;
+    await this.flushInternal();
+  }
 
+  private async flushInternal(): Promise<void> {
+    if (this.flushing || this.buffer.length === 0) return;
     this.flushing = true;
     const batch = this.buffer.splice(0, this.buffer.length);
 
@@ -109,9 +113,9 @@ export class AgentLogger {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
     this.stopTimer();
-    await this.flush();
+    await this.flushInternal();
+    this.closed = true;
   }
 }
 

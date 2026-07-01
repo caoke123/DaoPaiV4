@@ -100,7 +100,7 @@ export async function reportProgress(
 export async function uploadLogs(
   client: AxiosInstance,
   taskId: string,
-  logs: Array<{ level: string; message: string; timestamp: string }>,
+  logs: Array<{ level: string; message: string; timestamp: string; staffName?: string }>,
 ): Promise<void> {
   await client.post(`/agent/tasks/${taskId}/logs`, { logs });
 }

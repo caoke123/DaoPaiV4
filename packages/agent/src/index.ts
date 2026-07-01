@@ -252,6 +252,10 @@ async function main(): Promise<void> {
         } catch (err) {
           const msg = (err as Error).message;
           safeLog('warn', `任务拉取失败：${msg}`, config.agentToken);
+          // Phase 5-G-3-2: Executor 异常时必须更新 PG 任务状态，否则任务卡在 assigned 无法被重新拉取
+          if (runningTaskId) {
+            await failTask(client, runningTaskId, msg).catch(() => {});
+          }
           runningTaskId = null;
         }
       }

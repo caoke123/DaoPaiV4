@@ -161,7 +161,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
 
   // ── Phase 5-G-2: 使用统一日志 Hook ──
   const belongsToMe = !taskOrigin || taskOrigin === submitApi;
-  const taskActive = !!(belongsToMe && taskId && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error'));
+  const taskActive = !!(belongsToMe && taskId && liveStatus !== 'idle');
   const displayWorkers = taskActive && ctxSelectedWorkers.length > 0 ? ctxSelectedWorkers : selectedWorkers;
 
   const { allLogs, logsByWorker, globalLogs, isRunning: logsIsRunning } = useTaskLiveLogs({
@@ -408,13 +408,17 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
     ctxSetSubmitting(true);
     setLocalFetchError('');
     try {
-      const resp = await submitTask(submitApi, { site: activeSiteId, executionMode, assignments });
+      // Phase 5-G-3-2: 传递 dryRunMode 给后端，后端写入 inputData.browserDryRun，Agent Executor 校验通过后执行
+      const resp = await submitTask(submitApi, { site: activeSiteId, executionMode, assignments, dryRunMode });
+      if (!resp.taskId) {
+        throw new Error('后端未返回任务 ID，无法开始实时日志跟踪');
+      }
       ctxStartTask(resp.taskId, validWorkers, allocations, submitApi);
     } catch (e) {
       setLocalFetchError((e as Error).message || '提交任务失败');
       ctxSetSubmitting(false);
     }
-  }, [validCount, selectedWorkers, currentSiteStaffNames, activeSiteId, assignments, allocations, submitApi, ctxStartTask, ctxSetSubmitting]);
+  }, [validCount, selectedWorkers, currentSiteStaffNames, activeSiteId, assignments, allocations, submitApi, ctxStartTask, ctxSetSubmitting, dryRunMode]);
 
   const handleStart = useCallback(() => {
     if (validCount === 0 || selectedWorkers.length === 0 || !activeSiteId) return;

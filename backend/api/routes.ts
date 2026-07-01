@@ -18,6 +18,7 @@ import { SettingsManager } from '../config/SettingsManager';
 import { isLoginCapableWindow } from '../config/SettingsManager';
 import { PgDatabase } from '../db/PgDatabase';
 import { getTenantId, getWorkstationId } from './middleware/requestContext';
+import { taskLogService } from '../services/TaskLogService';
 // Phase D-1: 统一任务执行引擎
 import { AssignmentEngine, ArrivalHandler, DispatchHandler, IntegratedHandler, SignHandler, InitWindowHandler, type Assignment } from '../modules/assignment-engine';
 // 类型仅用于请求体校验（业务执行已交给 Engine）
@@ -958,10 +959,11 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
   const pg = PgDatabase.getInstance();
 
   // 1. 请求体校验
-  const { site, assignments, waybillNos } = req.body as {
+  const { site, assignments, waybillNos, dryRunMode } = req.body as {
     site: string;
     assignments?: Assignment[];
     waybillNos?: string[];
+    dryRunMode?: boolean;
   };
 
   if (!site) {
@@ -1010,11 +1012,13 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
 
   // Phase 2-C: PG 主写 — 预生成 UUID，先写 PG（PRIMARY），失败直接 500
   const taskId = randomUUID();
-  const inputData = finalAssignments.length > 0 ? { assignments } : { waybillNos };
+  const inputData = finalAssignments.length > 0
+    ? { assignments, browserDryRun: dryRunMode === true, dryRun: dryRunMode === true }
+    : { waybillNos, browserDryRun: dryRunMode === true, dryRun: dryRunMode === true };
   try {
     await pg.insertTask({
       id: taskId,
-      type: 'arrive',
+      type: 'arrival',
       siteId: siteCode,
       status: 'pending',
       totalCount,
@@ -1024,7 +1028,7 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
       workstationId: getWorkstationId(req),
     });
   } catch (e) {
-    console.error('[PG] insertTask arrive failed:', (e as Error).message);
+    console.error('[PG] insertTask arrival failed:', (e as Error).message);
     return res.status(500).json({ error: `任务创建失败（PG写入异常）: ${(e as Error).message}` });
   }
 
@@ -1032,7 +1036,7 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
   try {
     db.createTask({
       id: taskId,
-      type: 'arrive',
+      type: 'arrival',
       site: siteCode,
       status: 'pending',
       total_count: totalCount,
@@ -1044,25 +1048,16 @@ router.post('/api/operations/arrive', async (req: Request, res: Response) => {
     console.warn('[DB] createTask legacy mirror failed (arrive, non-blocking):', (e as Error).message);
   }
 
-  taskLogManager.addLog(taskId, 'info', `任务开始: 到件扫描, 单号数=${totalCount}, 员工数=${finalAssignments.length || '(自动)'}`, 'api');
+  const startLog = `任务开始: 到件扫描, 单号数=${totalCount}, 员工数=${finalAssignments.length || '(自动)'}`;
+  taskLogManager.addLog(taskId, 'info', startLog, 'api');
+  await taskLogService.appendLogs(taskId, [{ level: 'info', message: startLog }], {
+    tenantId: getTenantId(req),
+    workstationId: getWorkstationId(req),
+    source: 'api',
+  }).catch(e => console.warn('[PG] append start log arrival failed:', (e as Error).message));
 
-  // 3. 立即返回
+  // 3. 立即返回（任务由 Agent 从 PG 拉取执行，不再由 AssignmentEngine 直接执行）
   res.json({ taskId, status: 'pending' });
-
-  // 4. 异步执行（Phase 8.2: 健康检测 + 自动选 Worker 统一委托给 Engine，确保终态一致）
-  const engine = AssignmentEngine.getInstance();
-  void engine.execute({
-    taskId,
-    site: siteCode,
-    taskType: 'arrival',
-    assignments: finalAssignments,
-    handler: new ArrivalHandler(),
-    waybillNos: finalAssignments.length === 0 ? waybillNos : undefined,
-  }).catch(err => {
-    // Safety net: engine.execute() 内部已 try/catch 所有异常并写终态，
-    // 此处仅捕获极端情况下的未预期异常（不应发生）
-    console.error('[arrive] 未预期异常:', err);
-  });
 });
 
 /** POST /api/operations/dispatch — 提交派件任务（多员工并发） */
@@ -1072,10 +1067,11 @@ router.post('/api/operations/dispatch', async (req: Request, res: Response) => {
   const pg = PgDatabase.getInstance();
 
   // 1. 请求体校验
-  const { site, assignments, executionMode: rawExecutionMode } = req.body as {
+  const { site, assignments, executionMode: rawExecutionMode, dryRunMode } = req.body as {
     site: string;
     assignments: DispatchAssignment[];
     executionMode?: string;
+    dryRunMode?: boolean;
   };
   const executionMode = rawExecutionMode || 'default';
   if (executionMode !== 'default' && executionMode !== 'designated') {
@@ -1139,7 +1135,7 @@ router.post('/api/operations/dispatch', async (req: Request, res: Response) => {
 
   // Phase 2-C: PG 主写 — 预生成 UUID，先写 PG（PRIMARY），失败直接 500
   const taskId = randomUUID();
-  const inputData = { executionMode, assignments };
+  const inputData = { executionMode, assignments, browserDryRun: dryRunMode === true, dryRun: dryRunMode === true };
   try {
     await pg.insertTask({
       id: taskId,
@@ -1173,22 +1169,16 @@ router.post('/api/operations/dispatch', async (req: Request, res: Response) => {
     console.warn('[DB] createTask legacy mirror failed (dispatch, non-blocking):', (e as Error).message);
   }
 
-  taskLogManager.addLog(taskId, 'info', `任务开始: 派件扫描, 员工数=${assignments.length}, 单号数=${totalCount}`, 'api');
+  const startLog = `任务开始: 派件扫描, 员工数=${assignments.length}, 单号数=${totalCount}`;
+  taskLogManager.addLog(taskId, 'info', startLog, 'api');
+  await taskLogService.appendLogs(taskId, [{ level: 'info', message: startLog }], {
+    tenantId: getTenantId(req),
+    workstationId: getWorkstationId(req),
+    source: 'api',
+  }).catch(e => console.warn('[PG] append start log dispatch failed:', (e as Error).message));
 
-  // 3. 立即返回
+  // 3. 立即返回（任务由 Agent 从 PG 拉取执行，不再由 AssignmentEngine 直接执行）
   res.json({ taskId, status: 'pending' });
-
-  // 4. 异步执行（Phase D-1: 委托给 AssignmentEngine）
-  // Phase 2-B: 将 executionMode 注入每个 assignment
-  const engineAssignments: Assignment[] = assignments.map(a => ({ ...a, executionMode }));
-  const engine = AssignmentEngine.getInstance();
-  void engine.execute({
-    taskId,
-    site: siteCode,
-    taskType: 'dispatch',
-    assignments: engineAssignments,
-    handler: new DispatchHandler(),
-  });
 });
 
 /** POST /api/operations/integrated — 提交到派一体任务（多员工并发） */
@@ -1198,10 +1188,11 @@ router.post('/api/operations/integrated', async (req: Request, res: Response) =>
   const pg = PgDatabase.getInstance();
 
   // 1. 请求体校验
-  const { site, assignments, executionMode: rawExecutionMode } = req.body as {
+  const { site, assignments, executionMode: rawExecutionMode, dryRunMode } = req.body as {
     site: string;
     assignments: IntegratedAssignment[];
     executionMode?: string;
+    dryRunMode?: boolean;
   };
   const executionMode = rawExecutionMode || 'default';
   if (executionMode !== 'default' && executionMode !== 'designated') {
@@ -1265,7 +1256,7 @@ router.post('/api/operations/integrated', async (req: Request, res: Response) =>
 
   // Phase 2-C: PG 主写 — 预生成 UUID，先写 PG（PRIMARY），失败直接 500
   const taskId = randomUUID();
-  const inputData = { executionMode, assignments };
+  const inputData = { executionMode, assignments, browserDryRun: dryRunMode === true, dryRun: dryRunMode === true };
   try {
     await pg.insertTask({
       id: taskId,
@@ -1299,22 +1290,16 @@ router.post('/api/operations/integrated', async (req: Request, res: Response) =>
     console.warn('[DB] createTask legacy mirror failed (integrated, non-blocking):', (e as Error).message);
   }
 
-  taskLogManager.addLog(taskId, 'info', `任务开始: 到派一体扫描, 员工数=${assignments.length}, 单号数=${totalCount}`, 'api');
+  const startLog = `任务开始: 到派一体扫描, 员工数=${assignments.length}, 单号数=${totalCount}`;
+  taskLogManager.addLog(taskId, 'info', startLog, 'api');
+  await taskLogService.appendLogs(taskId, [{ level: 'info', message: startLog }], {
+    tenantId: getTenantId(req),
+    workstationId: getWorkstationId(req),
+    source: 'api',
+  }).catch(e => console.warn('[PG] append start log integrated failed:', (e as Error).message));
 
-  // 3. 立即返回
+  // 3. 立即返回（任务由 Agent 从 PG 拉取执行，不再由 AssignmentEngine 直接执行）
   res.json({ taskId, status: 'pending' });
-
-  // 4. 异步执行（Phase D-1: 委托给 AssignmentEngine）
-  // Phase 2-B: 将 executionMode 注入每个 assignment
-  const engineAssignments: Assignment[] = assignments.map(a => ({ ...a, executionMode }));
-  const engine = AssignmentEngine.getInstance();
-  void engine.execute({
-    taskId,
-    site: siteCode,
-    taskType: 'integrated',
-    assignments: engineAssignments,
-    handler: new IntegratedHandler(),
-  });
 });
 
 /** POST /api/operations/sign — 提交签收任务（Phase E-1: 预览模式，多员工并发） */
@@ -1324,10 +1309,11 @@ router.post('/api/operations/sign', async (req: Request, res: Response) => {
   const pg = PgDatabase.getInstance();
 
   // 1. 请求体校验
-  const { site, assignments, executionMode: rawExecutionMode } = req.body as {
+  const { site, assignments, executionMode: rawExecutionMode, dryRunMode } = req.body as {
     site: string;
     assignments: SignAssignment[];
     executionMode?: string;
+    dryRunMode?: boolean;
   };
   const executionMode = rawExecutionMode || 'default';
   if (executionMode !== 'default' && executionMode !== 'designated') {
@@ -1392,7 +1378,7 @@ router.post('/api/operations/sign', async (req: Request, res: Response) => {
 
   // Phase 2-C: PG 主写 — 预生成 UUID，先写 PG（PRIMARY），失败直接 500
   const taskId = randomUUID();
-  const inputData = { executionMode, assignments };
+  const inputData = { executionMode, assignments, browserDryRun: dryRunMode === true, dryRun: dryRunMode === true };
   try {
     await pg.insertTask({
       id: taskId,
@@ -1426,23 +1412,21 @@ router.post('/api/operations/sign', async (req: Request, res: Response) => {
     console.warn('[DB] createTask legacy mirror failed (sign, non-blocking):', (e as Error).message);
   }
 
-  taskLogManager.addLog(taskId, 'info', `任务开始: 签收录入(预览模式), 员工数=${assignments.length}`, 'api');
-  taskLogManager.addLog(taskId, 'info', `SIGN_DRY_RUN=true，将停止在签收确认弹窗，禁止真实签收`, 'api');
+  const startLog = `任务开始: 签收录入(预览模式), 员工数=${assignments.length}`;
+  const dryRunLog = `SIGN_DRY_RUN=true，将停止在签收确认弹窗，禁止真实签收`;
+  taskLogManager.addLog(taskId, 'info', startLog, 'api');
+  taskLogManager.addLog(taskId, 'info', dryRunLog, 'api');
+  await taskLogService.appendLogs(taskId, [
+    { level: 'info', message: startLog },
+    { level: 'info', message: dryRunLog },
+  ], {
+    tenantId: getTenantId(req),
+    workstationId: getWorkstationId(req),
+    source: 'api',
+  }).catch(e => console.warn('[PG] append start log sign failed:', (e as Error).message));
 
-  // 3. 立即返回
+  // 3. 立即返回（任务由 Agent 从 PG 拉取执行，不再由 AssignmentEngine 直接执行）
   res.json({ taskId, status: 'pending' });
-
-  // 4. 异步执行（Phase E-1: 委托给 AssignmentEngine → SignHandler → SignScan）
-  // Phase 2-B: 将 executionMode 注入每个 assignment
-  const engineAssignments: Assignment[] = assignments.map(a => ({ ...a, executionMode }));
-  const engine = AssignmentEngine.getInstance();
-  void engine.execute({
-    taskId,
-    site: siteCode,
-    taskType: 'sign',
-    assignments: engineAssignments,
-    handler: new SignHandler(),
-  });
 });
 
 /** GET /api/operations/stats — 服务端聚合统计 + 系统状态（必须在 /:taskId 之前注册） */

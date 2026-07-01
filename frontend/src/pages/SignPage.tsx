@@ -118,7 +118,7 @@ export default function SignPage() {
   // ── Phase 5-G-2: 使用统一日志 Hook ──
   const SUBMIT_API = '/api/operations/sign';
   const belongsToMe = !taskOrigin || taskOrigin === SUBMIT_API;
-  const taskActive = !!(belongsToMe && taskId && (liveStatus === 'running' || liveStatus === 'completed' || liveStatus === 'error'));
+  const taskActive = !!(belongsToMe && taskId && liveStatus !== 'idle');
   const displayWorkers = taskActive && ctxSelectedWorkers.length > 0 ? ctxSelectedWorkers : selectedWorkers;
 
   const { allLogs, logsByWorker, globalLogs, isRunning: logsIsRunning } = useTaskLiveLogs({
@@ -291,13 +291,16 @@ export default function SignPage() {
     ctxSetSubmitting(true);
     setLocalFetchError('');
     try {
-      const resp = await submitTask(SUBMIT_API, { site: activeSiteId, executionMode, assignments });
+      const resp = await submitTask(SUBMIT_API, { site: activeSiteId, executionMode, assignments, dryRunMode });
+      if (!resp.taskId) {
+        throw new Error('后端未返回任务 ID，无法开始实时日志跟踪');
+      }
       ctxStartTask(resp.taskId, validWorkers, allocations, SUBMIT_API);
     } catch (e) {
       setLocalFetchError((e as Error).message || '提交任务失败');
       ctxSetSubmitting(false);
     }
-  }, [selectedWorkers, currentSiteStaffNames, activeSiteId, assignments, allocations, ctxStartTask, ctxSetSubmitting]);
+  }, [selectedWorkers, currentSiteStaffNames, activeSiteId, assignments, allocations, ctxStartTask, ctxSetSubmitting, dryRunMode]);
 
   const handleStart = useCallback(() => {
     if (selectedWorkers.length === 0 || !activeSiteId) return;

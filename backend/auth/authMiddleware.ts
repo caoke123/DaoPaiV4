@@ -19,7 +19,8 @@ import { verifyAccessToken } from './jwt';
  */
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
   // Phase 4-E: /agent/* 路由使用执行电脑授权码鉴权，不走 JWT
-  if (req.path.startsWith('/agent/') || req.path === '/agent') {
+  const requestPath = req.path || req.url || '';
+  if (requestPath.startsWith('/agent/') || requestPath === '/agent') {
     req.principal = { type: 'anonymous' as const };
     return next();
   }
