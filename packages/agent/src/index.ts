@@ -13,16 +13,13 @@ import {
   getAgentMe,
   sendHeartbeat,
   pullTask,
+  runTaskWithBackendEngine,
   reportProgress,
   uploadLogs,
   completeTask,
   failTask,
 } from './httpClient';
 import { AgentSettingsLoader } from './AgentSettingsLoader';
-import { executeArrivalDryRun } from './executors/ArrivalExecutor';
-import { executeDispatchDryRun } from './executors/DispatchExecutor';
-import { executeIntegratedDryRun } from './executors/IntegratedExecutor';
-import { executeSignDryRun } from './executors/SignExecutor';
 import type { AxiosInstance } from 'axios';
 import type { AgentConfig } from './types';
 
@@ -99,6 +96,40 @@ async function executeAgentTestTask(
       logger.error(`任务 ${taskId} 标记失败时出错`);
     }
   }
+}
+
+function logBusinessTaskPayload(task: { taskId: string; type: string; siteId: string; payload: Record<string, unknown> }): void {
+  const payload = task.payload || {};
+  const assignments = Array.isArray((payload as any).assignments) ? (payload as any).assignments : [];
+  const assignmentsPreview = assignments.map((a: any) => ({
+    staffName: a?.staffName,
+    siteId: a?.siteId,
+    windowId: a?.windowId,
+    browserId: a?.browserId,
+    runtimeKey: a?.runtimeKey,
+    waybillCount: Array.isArray(a?.waybillNos) ? a.waybillNos.length : 0,
+  }));
+  console.log('[Agent][task payload]', {
+    taskId: task.taskId,
+    type: task.type,
+    siteId: task.siteId,
+    hasPayload: !!payload,
+    assignmentCount: assignments.length,
+    assignmentsPreview,
+  });
+}
+
+async function executeBusinessTaskWithBackendEngine(
+  client: AxiosInstance,
+  task: { taskId: string; type: string; siteId: string; payload: Record<string, unknown> },
+): Promise<void> {
+  logBusinessTaskPayload(task);
+  await uploadLogs(client, task.taskId, [{
+    level: 'info',
+    message: `Agent 收到业务任务，移交后端员工窗口引擎执行：type=${task.type}`,
+    timestamp: new Date().toISOString(),
+  }]);
+  await runTaskWithBackendEngine(client, task.taskId);
 }
 
 async function main(): Promise<void> {
@@ -183,64 +214,10 @@ async function main(): Promise<void> {
               await executeAgentTestTask(client, task.taskId, task.payload);
               runningTaskId = null;
             }
-            // arrival 到件扫描 DRY-RUN
-            else if (task.type === 'arrival') {
+            // 业务页任务：交给后端 AssignmentEngine 驱动所选员工窗口
+            else if (['arrival', 'dispatch', 'integrated', 'sign'].includes(task.type)) {
               runningTaskId = task.taskId;
-              await executeArrivalDryRun(
-                {
-                  taskId: task.taskId,
-                  siteId: task.siteId,
-                  payload: task.payload as any,
-                },
-                client,
-                settingsLoader,
-                config,
-              );
-              runningTaskId = null;
-            }
-            // dispatch 派件扫描 DRY-RUN（Phase 5-G）
-            else if (task.type === 'dispatch') {
-              runningTaskId = task.taskId;
-              await executeDispatchDryRun(
-                {
-                  taskId: task.taskId,
-                  siteId: task.siteId,
-                  payload: task.payload as any,
-                },
-                client,
-                settingsLoader,
-                config,
-              );
-              runningTaskId = null;
-            }
-            // integrated 到派一体 DRY-RUN（Phase 5-G）
-            else if (task.type === 'integrated') {
-              runningTaskId = task.taskId;
-              await executeIntegratedDryRun(
-                {
-                  taskId: task.taskId,
-                  siteId: task.siteId,
-                  payload: task.payload as any,
-                },
-                client,
-                settingsLoader,
-                config,
-              );
-              runningTaskId = null;
-            }
-            // sign 签收录入 DRY-RUN（Phase 5-G）
-            else if (task.type === 'sign') {
-              runningTaskId = task.taskId;
-              await executeSignDryRun(
-                {
-                  taskId: task.taskId,
-                  siteId: task.siteId,
-                  payload: task.payload as any,
-                },
-                client,
-                settingsLoader,
-                config,
-              );
+              await executeBusinessTaskWithBackendEngine(client, task);
               runningTaskId = null;
             }
             // 未知任务类型

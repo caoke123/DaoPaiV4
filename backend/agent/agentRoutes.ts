@@ -15,6 +15,8 @@ import { Router, type Request, type Response } from 'express';
 import { requireAgent } from '../auth/agentAuth';
 import { PgDatabase } from '../db/PgDatabase';
 import { taskLogService } from '../services/TaskLogService';
+import { AssignmentEngine, ArrivalHandler, DispatchHandler, IntegratedHandler, SignHandler, type Assignment } from '../modules/assignment-engine';
+import type { Site } from '../db/Database';
 
 export const agentRouter = Router();
 
@@ -28,6 +30,36 @@ function getAgentPrincipal(req: Request) {
     throw { status: 401, code: 'AGENT_TOKEN_INVALID', message: '鉴权失败' };
   }
   return { tenantId: p.tenantId, workstationId: p.workstationId, siteId: p.siteId };
+}
+
+function getEngineHandler(taskType: string) {
+  switch (taskType) {
+    case 'arrival':
+    case 'arrive':
+      return { taskType: 'arrival' as const, handler: new ArrivalHandler() };
+    case 'dispatch':
+      return { taskType: 'dispatch' as const, handler: new DispatchHandler() };
+    case 'integrated':
+      return { taskType: 'integrated' as const, handler: new IntegratedHandler() };
+    case 'sign':
+      return { taskType: 'sign' as const, handler: new SignHandler() };
+    default:
+      return null;
+  }
+}
+
+function normalizeTaskAssignments(inputData: unknown): { assignments: Assignment[]; waybillNos?: string[] } {
+  const payload = (inputData && typeof inputData === 'object') ? inputData as Record<string, any> : {};
+  const rawAssignments = Array.isArray(payload.assignments) ? payload.assignments : [];
+  const assignments = rawAssignments
+    .filter(a => a && typeof a.staffName === 'string')
+    .map(a => ({
+      ...a,
+      staffName: String(a.staffName),
+      waybillNos: Array.isArray(a.waybillNos) ? a.waybillNos.map(String) : [],
+    }));
+  const waybillNos = Array.isArray(payload.waybillNos) ? payload.waybillNos.map(String) : undefined;
+  return { assignments, waybillNos };
 }
 
 /** GET /agent/me — 验证授权码，返回执行电脑信息 */
@@ -150,6 +182,92 @@ agentRouter.post('/tasks/pull', async (req: Request, res: Response) => {
     if (e.status) return res.status(e.status).json({ ok: false, code: e.code, message: e.message, timestamp: new Date().toISOString() });
     console.error('[POST /agent/tasks/pull] 失败:', e.message);
     res.status(500).json({ ok: false, code: 'UNKNOWN_ERROR', message: '服务器内部错误', timestamp: new Date().toISOString() });
+  }
+});
+
+/** POST /agent/tasks/:id/run-engine — 使用业务页员工窗口执行已拉取任务 */
+agentRouter.post('/tasks/:id/run-engine', async (req: Request, res: Response) => {
+  try {
+    const { tenantId, workstationId } = getAgentPrincipal(req);
+    const taskId = req.params.id;
+    const pg = PgDatabase.getInstance();
+    const task = await pg.getTaskById(tenantId, taskId);
+
+    if (!task) {
+      return res.status(404).json({
+        ok: false,
+        code: 'TASK_NOT_FOUND',
+        message: '任务不存在',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const selected = getEngineHandler(task.type);
+    if (!selected) {
+      return res.status(400).json({
+        ok: false,
+        code: 'TASK_TYPE_UNSUPPORTED',
+        message: `不支持的业务任务类型：${task.type}`,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const { assignments, waybillNos } = normalizeTaskAssignments(task.inputData);
+    const assignmentPreview = assignments.map(a => ({
+      staffName: a.staffName,
+      siteId: (a as any).siteId,
+      windowId: a.windowId,
+      browserId: (a as any).browserId,
+      runtimeKey: (a as any).runtimeKey,
+      waybillCount: a.waybillNos.length,
+    }));
+
+    console.log('[AgentRoute][run-engine payload]', {
+      taskId,
+      type: task.type,
+      site: task.site,
+      status: task.status,
+      assignmentCount: assignments.length,
+      assignmentsPreview: assignmentPreview,
+      hasWaybillFallback: !!waybillNos?.length,
+    });
+
+    await taskLogService.appendLogs(taskId, [
+      {
+        level: 'info',
+        message: `Agent 已接管业务页任务，准备按员工窗口执行：员工数=${assignments.length || '(自动)'}，类型=${selected.taskType}`,
+      },
+      ...assignments.map(a => ({
+        level: 'info' as const,
+        staffName: a.staffName,
+        windowId: a.windowId,
+        message: `准备执行员工：${a.staffName}，单号数：${a.waybillNos.length}` +
+          ((a as any).runtimeKey ? `，runtimeKey=${(a as any).runtimeKey}` : ''),
+      })),
+    ], {
+      tenantId,
+      workstationId,
+      source: 'agent-engine',
+    });
+
+    await AssignmentEngine.getInstance().execute({
+      taskId,
+      site: task.site as Site,
+      taskType: selected.taskType,
+      assignments,
+      waybillNos,
+      handler: selected.handler,
+    });
+
+    res.json({
+      ok: true,
+      data: { accepted: true, taskId },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e: any) {
+    if (e.status) return res.status(e.status).json({ ok: false, code: e.code, message: e.message, timestamp: new Date().toISOString() });
+    console.error('[POST /agent/tasks/:id/run-engine] 失败:', e.message);
+    res.status(500).json({ ok: false, code: 'UNKNOWN_ERROR', message: e.message || '服务器内部错误', timestamp: new Date().toISOString() });
   }
 });
 

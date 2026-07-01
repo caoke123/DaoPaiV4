@@ -107,6 +107,7 @@ export default function SignPage() {
 
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [workerPageSizes, setWorkerPageSizes] = useState<Record<string, PageSizeOption>>({});
+  const [diagnosticExpanded, setDiagnosticExpanded] = useState(false);
 
   const {
     taskId, liveStatus, submitting, totalCount, doneCount, successCount, failedCount,
@@ -159,6 +160,14 @@ export default function SignPage() {
     [siteWindows],
   );
 
+  const windowMetaByStaff = useMemo(() => {
+    const map: Record<string, PlaywrightSiteWindowState> = {};
+    siteWindows.forEach(w => {
+      if (w.employeeName) map[w.employeeName] = w;
+    });
+    return map;
+  }, [siteWindows]);
+
   // 指定模式下：当前选中的执行窗口
   const designatedWindow = executionMode === 'designated' && selectedWorkers.length === 1
     ? selectedWorkers[0]
@@ -173,6 +182,10 @@ export default function SignPage() {
       const validWorkers = selectedWorkers.filter(name => currentSiteStaffNames.has(name));
       const baseAssignments: Assignment[] = validWorkers.map(staffName => ({
         staffName,
+        siteId: activeSiteId,
+        windowId: windowMetaByStaff[staffName]?.runtimeKey ? `staff-${staffName}` : undefined,
+        browserId: windowMetaByStaff[staffName]?.browserId ?? null,
+        runtimeKey: windowMetaByStaff[staffName]?.runtimeKey,
         waybillNos: ['SIGN_PREVIEW'],
         pageSize: getWorkerPageSize(staffName),
       }));
@@ -188,7 +201,7 @@ export default function SignPage() {
       }
       return baseAssignments;
     },
-    [selectedWorkers, getWorkerPageSize, currentSiteStaffNames, executionMode, targetCourier, usernameByEmployee, signerPerson],
+    [selectedWorkers, getWorkerPageSize, currentSiteStaffNames, executionMode, targetCourier, usernameByEmployee, signerPerson, activeSiteId, windowMetaByStaff],
   );
 
   const allocations = useMemo(() => {
@@ -332,6 +345,12 @@ export default function SignPage() {
   const isIdle = !belongsToMe || liveStatus === 'idle';
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const logCols = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
+
+  useEffect(() => {
+    if (liveStatus === 'error' || globalLogs.some(log => log.level === 'error')) {
+      setDiagnosticExpanded(true);
+    }
+  }, [liveStatus, globalLogs]);
 
   // Phase 4-I-1: getStatusBadge / getCardClass 已迁移到 lib/window-status.ts
 
@@ -775,7 +794,7 @@ export default function SignPage() {
           </div>
         </div>
 
-        {/* Phase 5-G-2: 任务总日志卡片 — taskActive 时始终显示，即使日志还没到也显示"任务启动中..." */}
+        {/* 系统诊断日志默认折叠，员工日志作为主视图 */}
         {taskActive && (
           <div className="log-matrix cols-1" style={{ marginBottom: '12px' }}>
             <div className="log-card">
@@ -784,19 +803,26 @@ export default function SignPage() {
                   <ListChecks size={12} />
                 </div>
                 <div>
-                  <div className="log-name">任务总日志</div>
+                  <div className="log-name">系统日志 / 诊断信息</div>
                   <div className="log-empno">全局执行信息</div>
                 </div>
                 <div className="log-progress-right">
                   <span className="log-count"><b>{globalLogs.length}</b> 条</span>
+                  <button className="btn-sm" type="button" onClick={() => setDiagnosticExpanded(v => !v)}>
+                    {diagnosticExpanded ? '收起' : '展开'}
+                  </button>
                 </div>
               </div>
-              <div className="log-progress-bar">
-                <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
-              </div>
-              <div className="log-body">
-                {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
-              </div>
+              {diagnosticExpanded && (
+                <>
+                  <div className="log-progress-bar">
+                    <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
+                  </div>
+                  <div className="log-body">
+                    {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -810,7 +836,7 @@ export default function SignPage() {
                   <ListChecks size={12} />
                 </div>
                 <div>
-                  <div className="log-name">任务总日志</div>
+                  <div className="log-name">系统日志 / 诊断信息</div>
                   <div className="log-empno">选择派件员后显示独立窗口日志</div>
                 </div>
               </div>

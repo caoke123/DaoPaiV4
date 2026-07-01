@@ -103,6 +103,27 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
 
   // ── 从 result 列表更新 workerProgress ──
   const updateProgressFromResults = useCallback((results: WaybillResult[], total: number, done: number, fail: number) => {
+    if (results.length === 0 && done > 0) {
+      const workers = selectedWorkersRef.current;
+      const allocs = allocationsRef.current;
+      setTotalCount(total);
+      setDoneCount(done);
+      setSuccessCount(done - fail);
+      setFailedCount(fail);
+      const wp: WorkerProgress = {};
+      workers.forEach(name => {
+        const allocTotal = allocs[name] || 0;
+        const ratio = total > 0 ? allocTotal / total : 0;
+        wp[name] = {
+          done: Math.min(allocTotal, Math.round(done * ratio)),
+          total: allocTotal,
+          failed: Math.min(allocTotal, Math.round(fail * ratio)),
+        };
+      });
+      setWorkerProgress(wp);
+      return;
+    }
+
     const workers = selectedWorkersRef.current;
     const allocs = allocationsRef.current;
 
@@ -120,6 +141,27 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
       if (!name || !wp[name]) return;
       wp[name].done++;
       if (!r.success) wp[name].failed++;
+    });
+    setWorkerProgress(wp);
+  }, []);
+
+  const updateProgressFromCounts = useCallback((total: number, done: number, fail: number) => {
+    setTotalCount(total);
+    setDoneCount(done);
+    setSuccessCount(Math.max(0, done - fail));
+    setFailedCount(fail);
+
+    const workers = selectedWorkersRef.current;
+    const allocs = allocationsRef.current;
+    const wp: WorkerProgress = {};
+    workers.forEach(name => {
+      const allocTotal = allocs[name] || 0;
+      const ratio = total > 0 ? allocTotal / total : 0;
+      wp[name] = {
+        done: Math.min(allocTotal, Math.round(done * ratio)),
+        total: allocTotal,
+        failed: Math.min(allocTotal, Math.round(fail * ratio)),
+      };
     });
     setWorkerProgress(wp);
   }, []);
@@ -272,10 +314,7 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
     pgCompletedRef.current = false;
 
     getTaskStatus(taskId).then(s => {
-      setTotalCount(s.totalCount);
-      setDoneCount(s.doneCount);
-      setFailedCount(s.failCount);
-      setSuccessCount(Math.max(0, s.doneCount - s.failCount));
+      updateProgressFromCounts(s.totalCount, s.doneCount, s.failCount);
 
       if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
         pgCompletedRef.current = true;
@@ -291,10 +330,7 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
       if (pgCompletedRef.current || isCompletedRef.current) return;
       try {
         const s = await getTaskStatus(taskId);
-        setTotalCount(s.totalCount);
-        setDoneCount(s.doneCount);
-        setFailedCount(s.failCount);
-        setSuccessCount(Math.max(0, s.doneCount - s.failCount));
+        updateProgressFromCounts(s.totalCount, s.doneCount, s.failCount);
 
         if (s.status === 'done' || s.status === 'failed' || s.status === 'cancelled') {
           pgCompletedRef.current = true;
@@ -313,7 +349,7 @@ export function TaskExecutionProvider({ children }: { children: ReactNode }) {
     return () => {
       if (pgStatusPollRef.current) { clearInterval(pgStatusPollRef.current); pgStatusPollRef.current = null; }
     };
-  }, [taskId]);
+  }, [taskId, updateProgressFromCounts]);
 
   const startTask = useCallback((tid: string, workers: string[], allocs: Allocations, origin: string) => {
     selectedWorkersRef.current = workers;

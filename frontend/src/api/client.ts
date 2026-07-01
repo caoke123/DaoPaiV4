@@ -460,7 +460,7 @@ export async function submitTask(
 /** 提交派件扫描任务（多员工并发） */
 export async function submitDispatchTask(
   site: string,
-  assignments: { staffName: string; waybillNos: string[] }[],
+  assignments: { staffName: string; siteId?: string; windowId?: string; browserId?: string | null; runtimeKey?: string; waybillNos: string[] }[],
 ): Promise<TaskSubmitResponse> {
   const resp = await fetchWithAuth(`${BASE}/operations/dispatch`, {
     method: 'POST',
@@ -477,7 +477,7 @@ export async function submitDispatchTask(
 /** 提交到派一体扫描任务 */
 export async function submitIntegratedTask(
   site: string,
-  assignments: { staffName: string; waybillNos: string[] }[],
+  assignments: { staffName: string; siteId?: string; windowId?: string; browserId?: string | null; runtimeKey?: string; waybillNos: string[] }[],
 ): Promise<TaskSubmitResponse> {
   const resp = await fetchWithAuth(`${BASE}/operations/integrated`, {
     method: 'POST',
@@ -496,7 +496,7 @@ export async function submitIntegratedTask(
  */
 export async function submitSignTask(
   site: string,
-  assignments: { staffName: string; waybillNos: string[] }[],
+  assignments: { staffName: string; siteId?: string; windowId?: string; browserId?: string | null; runtimeKey?: string; waybillNos: string[] }[],
 ): Promise<TaskSubmitResponse> {
   const resp = await fetchWithAuth(`${BASE}/operations/sign`, {
     method: 'POST',

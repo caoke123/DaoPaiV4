@@ -78,6 +78,18 @@ export async function pullTask(client: AxiosInstance): Promise<PullTaskResponse>
 }
 
 /**
+ * POST /agent/tasks/:id/run-engine — 让后端 AssignmentEngine 驱动业务页员工窗口执行
+ */
+export async function runTaskWithBackendEngine(
+  client: AxiosInstance,
+  taskId: string,
+): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/run-engine`, {}, {
+    timeout: 35 * 60 * 1000,
+  });
+}
+
+/**
  * POST /agent/tasks/:id/progress — 上报任务进度
  */
 export async function reportProgress(

@@ -14,6 +14,10 @@
  */
 export interface Assignment {
   staffName: string;
+  siteId?: string;
+  windowId?: string;
+  browserId?: string | null;
+  runtimeKey?: string;
   waybillNos: string[];
   /** Phase 2-B: 指定模式 — 目标派件员姓名 */
   targetCourierName?: string;

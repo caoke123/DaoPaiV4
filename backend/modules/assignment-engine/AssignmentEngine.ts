@@ -326,7 +326,7 @@ export class AssignmentEngine {
       if (pgLogBuffer.length === 0) return;
       const batch = pgLogBuffer.splice(0);
       try {
-        await pgDb.insertTaskLogs(batch);
+        await this.insertTaskLogsAndEmit(pgDb, batch);
       } catch (err) {
         console.error(`[Engine][PG] 日志批量写入失败 (task=${taskId}):`, (err as Error).message);
         // 日志写入失败不中断任务，但记录错误
@@ -372,6 +372,11 @@ export class AssignmentEngine {
       pgBatchSeq++;
       const currentBatchSeq = pgBatchSeq;
       writeChain = writeChain.then(async () => {
+        await pgDb.updateTaskStatus(taskId, {
+          status: 'running',
+          doneCount: totalDone,
+          failCount: totalFail,
+        });
         // 4a. 批次结果批量写入
         await pgDb.insertWaybillResults(taskId, currentBatchSeq, newResults);
         // 4b. 运单池 UPSERT：每条结果更新 waybill_pool 最新状态
@@ -389,6 +394,7 @@ export class AssignmentEngine {
             taskId,
           );
         }
+        await flushPgLogs();
       }).catch(err => {
         console.error(`[Engine][PG] 批次结果写入失败 (task=${taskId}, batch=${currentBatchSeq}):`, (err as Error).message);
         // 记录 PG 写入错误，任务终态将强制为 failed
@@ -445,7 +451,7 @@ export class AssignmentEngine {
       console.log(`[Engine] ${runtimeModeMsg}`);
 
       // Phase G-2: 启动任务前必须执行 EasyBR 健康检测
-      // Phase 2-D: playwright 模式下的 sign 任务跳过 EasyBR 健康检测（不依赖 EasyBR）
+        // Playwright staff windows do not depend on the legacy EasyBR health check.
       if (!usePlaywrightForSign) {
         const eb = EasyBRClient.getInstance();
         const health = await eb.checkHealth();
@@ -461,13 +467,14 @@ export class AssignmentEngine {
         }
         taskLogManager.addLog(taskId, 'info', `EasyBR 健康检测通过: ${health.message}`, 'Engine');
       } else {
-        taskLogManager.addLog(taskId, 'info', `跳过 EasyBR 健康检测（playwright 模式 + sign 任务）`, 'Engine');
-        pgLogBuffer.push({
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          taskId, timestamp: Date.now(), level: 'info',
-          message: `跳过 EasyBR 健康检测（playwright 模式 + sign 任务）`,
-          source: 'Engine',
-        });
+          const skipEasyBrMessage = `跳过 EasyBR 健康检测（playwright 模式 + ${taskType} 任务）`;
+          taskLogManager.addLog(taskId, 'info', skipEasyBrMessage, 'Engine');
+          pgLogBuffer.push({
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            taskId, timestamp: Date.now(), level: 'info',
+            message: skipEasyBrMessage,
+            source: 'Engine',
+          });
       }
 
       // Phase 8.2: 旧兼容模式 — waybillNos 自动选择 Worker（统一进入 Engine 生命周期）
@@ -1315,7 +1322,7 @@ export class AssignmentEngine {
     if (pgLogBuffer.length > 0) {
       const batch = pgLogBuffer.splice(0);
       try {
-        await pgDb.insertTaskLogs(batch);
+        await this.insertTaskLogsAndEmit(pgDb, batch);
       } catch (pgErr) {
         const errMsg = `[Engine][PG] 日志批量写入失败 (task=${taskId}): ${(pgErr as Error).message}`;
         console.error(errMsg);
@@ -1362,7 +1369,7 @@ export class AssignmentEngine {
     if (pgLogBuffer.length > 0) {
       const batch = pgLogBuffer.splice(0);
       try {
-        await pgDb.insertTaskLogs(batch);
+        await this.insertTaskLogsAndEmit(pgDb, batch);
       } catch (err) {
         console.error(`[Engine][PG] FATAL: 日志批量写入失败 (task=${taskId}):`, (err as Error).message);
       }
@@ -1376,6 +1383,18 @@ export class AssignmentEngine {
       failedCount,
       finishedAt: Date.now(),
     });
+  }
+
+  private async insertTaskLogsAndEmit(pgDb: PgDatabase, batch: TaskLogEntry[]): Promise<void> {
+    if (batch.length === 0) return;
+    await pgDb.insertTaskLogs(batch);
+    for (const entry of batch) {
+      taskEventBus.emit({
+        type: 'TASK_LOG',
+        taskId: entry.taskId,
+        payload: entry,
+      });
+    }
   }
 
   /**

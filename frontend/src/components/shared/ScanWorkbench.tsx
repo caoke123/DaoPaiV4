@@ -145,6 +145,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
 
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [selectedSigner, setSelectedSigner] = useState<string>(SUPPORTED_SIGNERS[0]);
+  const [diagnosticExpanded, setDiagnosticExpanded] = useState(false);
 
   // ── Phase 1: 执行模式状态 ──
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('default');
@@ -219,6 +220,14 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   // 指定模式下：当前选中的目标派件员账号
   const targetCourierAccount = targetCourier ? (usernameByEmployee[targetCourier] || '-') : '-';
 
+  const windowMetaByStaff = useMemo(() => {
+    const map: Record<string, PlaywrightSiteWindowState> = {};
+    siteWindows.forEach(w => {
+      if (w.employeeName) map[w.employeeName] = w;
+    });
+    return map;
+  }, [siteWindows]);
+
   const assignments = useMemo(
     () => {
       // ★ P0 安全加固：只允许当前站点员工参与分配，过滤掉可能残留的旧站点员工
@@ -226,18 +235,28 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
       const baseAssignments = hideWaybillInput
         ? validWorkers.map(staffName => ({ staffName, waybillNos: ['SIGN_PREVIEW'], signer: selectedSigner }))
         : buildAssignments(validWorkers, validWaybills);
+      const normalizedAssignments = baseAssignments.map(a => {
+        const w = windowMetaByStaff[a.staffName];
+        return {
+          ...a,
+          siteId: activeSiteId,
+          windowId: w?.runtimeKey ? `staff-${a.staffName}` : undefined,
+          browserId: w?.browserId ?? null,
+          runtimeKey: w?.runtimeKey,
+        };
+      });
       // Phase 2-B: 指定模式下注入 targetCourierName/targetCourierAccount
-      if (executionMode === 'designated' && baseAssignments.length === 1) {
+      if (executionMode === 'designated' && normalizedAssignments.length === 1) {
         const account = usernameByEmployee[targetCourier] || '';
-        baseAssignments[0] = {
-          ...baseAssignments[0],
+        normalizedAssignments[0] = {
+          ...normalizedAssignments[0],
           targetCourierName: targetCourier || baseAssignments[0].staffName,
           targetCourierAccount: account,
         };
       }
-      return baseAssignments;
+      return normalizedAssignments;
     },
-    [selectedWorkers, validWaybills, hideWaybillInput, selectedSigner, currentSiteStaffNames, executionMode, targetCourier, usernameByEmployee],
+    [selectedWorkers, validWaybills, hideWaybillInput, selectedSigner, currentSiteStaffNames, executionMode, targetCourier, usernameByEmployee, activeSiteId, windowMetaByStaff],
   );
 
   const allocations = useMemo(() => {
@@ -251,6 +270,12 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
   const isIdle = !belongsToMe || liveStatus === 'idle';
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
   const colsClass = displayWorkers.length <= 1 ? 'cols-1' : displayWorkers.length === 2 ? 'cols-2' : 'cols-3';
+
+  useEffect(() => {
+    if (liveStatus === 'error' || globalLogs.some(log => log.level === 'error')) {
+      setDiagnosticExpanded(true);
+    }
+  }, [liveStatus, globalLogs]);
 
   // 运单输入防抖：waybillInput 即时更新保证输入流畅，debouncedInput 延迟 300ms 用于解析
   const handleInputChange = useCallback((value: string) => {
@@ -877,7 +902,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
           </div>
         </div>
 
-        {/* Phase 5-G-2: 任务总日志卡片 — taskActive 时始终显示，即使日志还没到也显示"任务启动中..." */}
+        {/* 系统诊断日志默认折叠，员工日志作为主视图 */}
         {taskActive && (
           <div className="log-matrix cols-1" style={{ marginBottom: '12px' }}>
             <div className="log-card">
@@ -886,19 +911,26 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                   <ListChecks size={12} />
                 </div>
                 <div>
-                  <div className="log-name">任务总日志</div>
+                  <div className="log-name">系统日志 / 诊断信息</div>
                   <div className="log-empno">全局执行信息</div>
                 </div>
                 <div className="log-progress-right">
                   <span className="log-count"><b>{globalLogs.length}</b> 条</span>
+                  <button className="btn-sm" type="button" onClick={() => setDiagnosticExpanded(v => !v)}>
+                    {diagnosticExpanded ? '收起' : '展开'}
+                  </button>
                 </div>
               </div>
-              <div className="log-progress-bar">
-                <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
-              </div>
-              <div className="log-body">
-                {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
-              </div>
+              {diagnosticExpanded && (
+                <>
+                  <div className="log-progress-bar">
+                    <div className="log-progress-fill" style={{ width: '100%', background: 'var(--text-3)' }} />
+                  </div>
+                  <div className="log-body">
+                    {renderLogLines(globalLogs, isIdle, isRunning || logsIsRunning)}
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -943,7 +975,7 @@ export default function ScanWorkbench({ title, description, submitApi, hideWaybi
                   </svg>
                 </div>
                 <div>
-                  <div className="log-name">任务总日志</div>
+                  <div className="log-name">系统日志 / 诊断信息</div>
                   <div className="log-empno">选择节点后显示分窗口日志</div>
                 </div>
               </div>
