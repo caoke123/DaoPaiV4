@@ -136,7 +136,7 @@ export function WindowStateProvider({ children }: { children: ReactNode }) {
         // 合并策略：以 Playwright 运行时为主，Cloud 状态仅在 Playwright 离线时补充
         const merged = pwWindows.map(pw => {
           const cloud = cloudData.windows.find(cw => 
-            cw.staffName === pw.staffName || cw.windowId === pw.windowName
+            cw.staffName === pw.employeeName || cw.windowId === pw.windowName
           );
           
           // 如果 Playwright 已经是 ready/busy，则完全信任 Playwright

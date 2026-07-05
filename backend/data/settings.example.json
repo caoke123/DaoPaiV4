@@ -1,0 +1,27 @@
+{
+  "initialized": true,
+  "pinHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "pinSalt": "d41d8cd98f00b204e9800998ecf8427e",
+  "sites": [
+    {
+      "id": "site-tiannanda",
+      "name": "天南大",
+      "windows": [
+        {
+          "windowName": "刘磊",
+          "employeeName": "刘磊",
+          "username": "请填写账号",
+          "password": "请填写密码的Base64编码，或通过前端设置中心统一配置",
+          "easybrBrowserId": ""
+        }
+      ]
+    }
+  ],
+  "runtime": {
+    "dryRunMode": true
+  },
+  "dataRetention": {
+    "retentionDays": 30,
+    "cleanupFrequency": "weekly"
+  }
+}
