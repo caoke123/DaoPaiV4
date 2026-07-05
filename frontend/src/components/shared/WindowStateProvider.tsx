@@ -125,36 +125,45 @@ export function WindowStateProvider({ children }: { children: ReactNode }) {
   const fetchSiteWindows = useCallback(async () => {
     if (!activeSiteId) return;
     try {
-      // D-0C: 优先读取 Cloud persistent window_status
+      // 1. 获取 Playwright 实时运行时状态（最高优先级）
+      const playwrightData = await getSitePlaywrightWindows(activeSiteId);
+      const pwWindows = playwrightData.windows;
+      
+      // 2. 获取 Cloud persistent window_status 作为补充
       const cloudData = await getCloudWindowStatus(activeSiteId).catch(() => null);
+      
       if (cloudData && cloudData.windows.length > 0) {
-        // Map cloud status to playwright-compatible format
-        setSiteWindows(cloudData.windows.map((w: CloudWindowStatus) => ({
-          windowId: w.windowId,
-          staffName: w.staffName,
-          runtimeKey: `${w.siteId}-${w.workstationId}-${w.windowId}`,
-          status: w.status,
-          p0Passed: w.isDashboardReady,
-          pageCount: w.isDashboardReady ? 1 : 0,
-          currentUrl: w.currentUrl || '',
-          tenantId: (w as any).tenantId || '',
-          siteId: w.siteId,
-          siteName: '',
-          windowName: w.windowId,
-          employeeName: w.staffName,
-          browserId: null,
-          p0Check: { required: true },
-          cachedStatus: null,
-          lastStatusCheckAt: null,
-        } as unknown as PlaywrightSiteWindowState)));
-        setSiteName('');
-        setFetchError('');
-        return;
+        // 合并策略：以 Playwright 运行时为主，Cloud 状态仅在 Playwright 离线时补充
+        const merged = pwWindows.map(pw => {
+          const cloud = cloudData.windows.find(cw => 
+            cw.staffName === pw.staffName || cw.windowId === pw.windowName
+          );
+          
+          // 如果 Playwright 已经是 ready/busy，则完全信任 Playwright
+          if (pw.status === 'ready' || pw.status === 'busy') {
+            return pw;
+          }
+          
+          // 如果 Playwright 离线但 Cloud 有在线状态，尝试合并（仅作为参考）
+          if (cloud && cloud.status !== 'offline') {
+            return {
+              ...pw,
+              status: cloud.status,
+              p0Passed: cloud.isDashboardReady,
+              currentUrl: cloud.currentUrl || pw.currentUrl,
+            } as PlaywrightSiteWindowState;
+          }
+          
+          return pw;
+        });
+        
+        setSiteWindows(merged);
+        setSiteName(playwrightData.siteName);
+      } else {
+        setSiteWindows(pwWindows);
+        setSiteName(playwrightData.siteName);
       }
-      // Fallback: Playwright 过渡路径
-      const data = await getSitePlaywrightWindows(activeSiteId);
-      setSiteWindows(data.windows);
-      setSiteName(data.siteName);
+      
       setFetchError('');
     } catch (e) {
       setFetchError('无法连接到后端服务');
