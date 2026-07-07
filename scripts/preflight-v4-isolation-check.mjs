@@ -34,6 +34,17 @@ const FORBIDDEN = {
     { pattern: /3300/, label: 'V3 backend port in compose' },
     { pattern: /5176/, label: 'V3 frontend port in compose' },
   ],
+  configFiles: [
+    { pattern: /"cloudApiUrl":\s*"http:\/\/localhost:3300"/, label: 'V3 backend in agent cloudApiUrl' },
+    { pattern: /"cloudBaseUrl":\s*"http:\/\/localhost:3300"/, label: 'V3 backend in agent cloudBaseUrl' },
+    { pattern: /cloudApiUrl.*localhost:3300/, label: 'V3 backend in agent config doc' },
+    { pattern: /port:\s*5176/, label: 'V3 frontend port in vite config' },
+    { pattern: /target:\s*'http:\/\/localhost:3300/, label: 'V3 backend in vite proxy' },
+    { pattern: /process\.env\.PORT \|\| '3300'/, label: 'V3 backend port default in backend/index.ts' },
+    { pattern: /process\.env\.PG_PORT \|\| '5436'/, label: 'V3 PG port default in PgDatabase.ts' },
+    { pattern: /process\.env\.PG_DATABASE \|\| 'daopai_v3'/, label: 'V3 DB name default in PgDatabase.ts' },
+    { pattern: /process\.env\.REDIS_PORT \|\| '6381'/, label: 'V3 Redis port default in source' },
+  ],
 };
 
 function loadEnv() {
@@ -111,12 +122,45 @@ for (const item of FORBIDDEN.docker) {
   }
 }
 
+// ── Check config files ──
+heading('checking config files isolation...');
+
+const configFilePaths = [
+  ['packages/agent/agent.example.json', 'agent.example.json'],
+  ['packages/agent/agent.json', 'agent.json'],
+  ['packages/agent/README.md', 'agent README'],
+  ['frontend/vite.config.ts', 'vite.config.ts'],
+  ['backend/index.ts', 'backend/index.ts'],
+  ['backend/db/PgDatabase.ts', 'PgDatabase.ts'],
+  ['.env.example', '.env.example'],
+  ['package.json', 'package.json'],
+];
+
+for (const [relPath, label] of configFilePaths) {
+  const fpath = resolve(ROOT, ...relPath.split('/'));
+  if (!existsSync(fpath)) {
+    ok(`${label} not found, skipping`);
+    continue;
+  }
+  const content = readFileSync(fpath, 'utf-8');
+  let matched = false;
+  for (const item of FORBIDDEN.configFiles) {
+    if (item.pattern.test(content)) {
+      fail(`forbidden V3 ${item.label}`, `in ${label}`);
+      matched = true;
+    }
+  }
+  if (!matched) {
+    ok(`no V3 in ${label}`);
+  }
+}
+
 // ── Result ──
 heading(failures === 0 ? 'PASS' : 'DONE');
 
 if (failures > 0) {
   console.log(`\n[V4 PREFLIGHT] ABORT: ${failures} forbidden V3 resource(s) detected.`);
-  console.log('[V4 PREFLIGHT] Fix .env and docker-compose.yml before starting V4.');
+  console.log('[V4 PREFLIGHT] Fix .env, docker-compose.yml, and config files before starting V4.');
   process.exit(1);
 }
 

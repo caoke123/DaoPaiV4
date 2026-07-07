@@ -1,6 +1,6 @@
 {
-  "cloudApiUrl": "http://localhost:3300",
-  "cloudBaseUrl": "http://localhost:3300",
+  "cloudApiUrl": "http://localhost:3400",
+  "cloudBaseUrl": "http://localhost:3400",
   "tenantId": "tenant_xxx",
   "siteId": "site_xxx",
   "workstationId": "ws_xxx",

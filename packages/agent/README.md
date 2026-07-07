@@ -83,7 +83,7 @@ Copy-Item .\agent.example.json .\agent.json
 
 ```json
 {
-  "cloudBaseUrl": "http://localhost:3300",
+  "cloudBaseUrl": "http://localhost:3400",
   "agentToken": "daopai_agent_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "workstationName": "天南大-前台电脑01",
   "siteId": null,
