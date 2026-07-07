@@ -497,27 +497,10 @@ router.post('/api/settings/init', async (req: Request, res: Response) => {
   }
 });
 
-/** POST /api/settings/verify-pin — 验证管理员 PIN */
-router.post('/api/settings/verify-pin', async (req: Request, res: Response) => {
-  try {
-    const { pin } = req.body as { pin: string };
-    if (!pin) {
-      return res.status(400).json({ error: '缺少 PIN 码' });
-    }
-    const sm = SettingsManager.getInstance();
-    const ok = await sm.verifyPin(pin);
-    if (!ok) {
-      return res.status(401).json({ ok: false, error: 'PIN 码错误' });
-    }
-    res.json({ ok: true });
-  } catch (err) {
-    const msg = (err as Error).message;
-    if (msg.includes('未初始化')) {
-      return res.status(403).json({ error: msg });
-    }
-    console.error('[settings/verify-pin]', msg);
-    res.status(500).json({ error: msg });
-  }
+/** POST /api/settings/verify-pin — 验证管理员 PIN（已禁用 PIN 保护） */
+router.post('/api/settings/verify-pin', async (_req: Request, res: Response) => {
+  // PIN protection disabled — always accept
+  res.json({ ok: true });
 });
 
 /** GET /api/settings/config — 获取系统配置 */
@@ -529,7 +512,7 @@ router.get('/api/settings/config', async (_req: Request, res: Response) => {
   } catch (err) {
     const msg = (err as Error).message;
     if (msg === 'NOT_INITIALIZED') {
-      return res.status(404).json({ initialized: false, sites: [], error: '系统未初始化' });
+      return res.status(200).json({ initialized: false, sites: [], error: '系统未初始化' });
     }
     console.error('[settings/config GET]', msg);
     res.status(500).json({ initialized: false, sites: [], error: msg });
