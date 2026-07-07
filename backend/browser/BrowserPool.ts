@@ -200,7 +200,8 @@ export class BrowserPool {
         this.cleanupDeadConnection(windowId, conn);
       },
       afterCheckCycle: async () => {
-        await this.discoverAndReconnectWindows();
+        // D-0B: V3 Playwright 模式下不再扫描 EasyBR 新窗口
+        // PlaywrightRuntime 管理所有窗口生命周期，BrowserPool 仅保留 CDP 连接能力
       },
     }, TARGET_DOMAIN);
   }

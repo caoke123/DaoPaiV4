@@ -194,21 +194,6 @@ router.get('/api/diag/connections', async (_req: Request, res: Response) => {
   }
 });
 
-/** POST /api/windows/:browerid/toggle — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】 */
-router.post('/api/windows/:browerid/toggle', (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'EasyBR legacy mode has been removed in DaoPai V3', code: 'EASYBR_GONE' });
-});
-
-/** POST /api/windows/:browerid/cleanup-pages — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】 */
-router.post('/api/windows/:browerid/cleanup-pages', (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'EasyBR legacy mode has been removed in DaoPai V3', code: 'EASYBR_GONE' });
-});
-
-/** POST /api/windows/:browerid/ensure-ready — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】 */
-router.post('/api/windows/:browerid/ensure-ready', (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'EasyBR legacy mode has been removed in DaoPai V3', code: 'EASYBR_GONE' });
-});
-
 // ── 窗口初始化任务接口 ──────────────────────────────────
 
 /** POST /api/windows/init — 提交窗口初始化任务 */
@@ -365,37 +350,7 @@ router.get('/api/windows/status', async (_req: Request, res: Response) => {
 
 // ── 站点窗口 4 态 API（对齐设置中心配置）────────────────────
 
-/** GET /api/sites/:siteId/windows — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】
- *  V3 请使用 GET /api/sites/:siteId/playwright-windows */
-router.get('/api/sites/:siteId/windows', (_req: Request, res: Response) => {
-  res.status(410).json({
-    error: 'EasyBR legacy mode has been removed in DaoPai V3',
-    code: 'EASYBR_GONE',
-    hint: 'Use GET /api/sites/:siteId/playwright-windows instead',
-  });
-});
 
-/** POST /api/sites/:siteId/windows/launch-all — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】
- *  V3 请使用 POST /api/sites/:siteId/playwright-windows/launch-all */
-router.post('/api/sites/:siteId/windows/launch-all', (_req: Request, res: Response) => {
-  res.status(410).json({
-    error: 'EasyBR legacy mode has been removed in DaoPai V3',
-    code: 'EASYBR_GONE',
-    hint: 'Use POST /api/sites/:siteId/playwright-windows/launch-all instead',
-  });
-});
-
-// ── D-0B: EasyBR legacy routes removed ─────────────────
-
-/** POST /api/easybr/open-browser — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】 */
-router.post('/api/easybr/open-browser', (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'EasyBR legacy mode has been removed in DaoPai V3', code: 'EASYBR_GONE' });
-});
-
-/** POST /api/easybr/reconnect — 【D-0B: EasyBR legacy 已移除，返回 410 Gone】 */
-router.post('/api/easybr/reconnect', (_req: Request, res: Response) => {
-  res.status(410).json({ error: 'EasyBR legacy mode has been removed in DaoPai V3', code: 'EASYBR_GONE' });
-});
 
 // ── Deploy-0C: Cloud 窗口状态查询接口 ─────────────────
 

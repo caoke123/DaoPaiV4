@@ -787,42 +787,6 @@ export interface SiteWindowState {
   status: WindowState;
 }
 
-/** GET /api/sites/:siteId/windows 响应 */
-export interface SiteWindowsResponse {
-  siteId: string;
-  siteName: string;
-  windows: SiteWindowState[];
-}
-
-export async function getSiteWindows(siteId: string): Promise<SiteWindowsResponse> {
-  const resp = await fetchWithAuth(`${BASE}/sites/${siteId}/windows`);
-  if (!resp.ok) throw new Error(`查询站点窗口失败: HTTP ${resp.status}`);
-  return resp.json();
-}
-
-/** POST /api/sites/:siteId/windows/launch-all 响应 */
-export interface LaunchAllResponse {
-  launched: number;
-  failed: number;
-  partial: number;
-  total: number;
-  timeout: boolean;
-  success: boolean;
-  message: string;
-  windows: { windowName: string; staffName: string; browserId: string; status: string; ready: boolean; message?: string }[];
-}
-
-export async function launchAllWindows(siteId: string): Promise<LaunchAllResponse> {
-  const resp = await fetchWithAuth(`${BASE}/sites/${siteId}/windows/launch-all`, {
-    method: 'POST',
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.message || err.error || `HTTP ${resp.status}`);
-  }
-  return resp.json();
-}
-
 // ── Phase 4-B: Window Runtime Mode API（playwright 模式专用） ──
 
 /** 窗口运行模式（与 backend/config/runtimeMode.ts 对齐） */

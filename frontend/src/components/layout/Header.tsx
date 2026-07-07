@@ -4,7 +4,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../stores/authStore';
 import {
-  launchAllWindows,
   launchAllPlaywrightWindows,
   ensurePlaywrightWindow,
   getTaskProgress,
@@ -211,7 +210,7 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
         changed = true;
         continue;
       }
-      // legacy 空 marker 在 connecting 状态也清理（无 taskId 可轮询）
+      // stale 空 marker 在 connecting 状态也清理（无 taskId 可轮询）
       if (!marker && sw.status === 'connecting') {
         next.delete(key);
         changed = true;
@@ -262,10 +261,8 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   const handleInitWindow = async (sw: PlaywrightSiteWindowState) => {
     const staffName = sw.employeeName || sw.windowName;
 
-    // playwright 模式：走 adapter.ensureWindowReady（headed=true, keepOpen=true）
-    if (isPlaywright) {
-      markInitializing(sw, 'pw-ensure');
-      try {
+    markInitializing(sw, 'pw-ensure');
+    try {
         const res = await ensurePlaywrightWindow(activeSiteId, staffName);
         setLaunchMsg(
           res.ready ? `Chrome 已就绪：${staffName}`
@@ -274,20 +271,13 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
           : res.status === 'failed' ? `弹窗清理失败：${staffName}`
           : `启动中：${staffName} (${res.status})`,
         );
-        // 先清除初始化标记，再拉取最新状态
-        // 否则 getEffectiveStatus 会把 ready 的窗口覆盖为 'initializing'
         clearInitializing(sw);
         await fetchSiteWindows();
       } catch (e) {
         console.error(`[playwright-ensure] ${sw.windowName} 启动失败:`, e);
         setLaunchMsg(`Chrome 启动失败 ${staffName}: ${(e as Error).message}`);
         clearInitializing(sw);
-      }
-      return;
     }
-
-    // EasyBR legacy mode has been removed in DaoPai V3
-    setLaunchMsg('EasyBR legacy mode has been removed in DaoPai V3, please switch to Playwright mode');
   };
 
   // ── 一键启动 ──
@@ -325,11 +315,8 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
     };
 
     try {
-      // playwright 模式：走 adapter.ensureWindowReady（不依赖 EasyBR）
-      // legacy 模式：走原 EasyBR launch-all
-      const res = isPlaywright
-        ? await launchAllPlaywrightWindows(activeSiteId)
-        : await launchAllWindows(activeSiteId);
+      // V3 统一使用 Playwright 模式窗口管理（EasyBR legacy 已移除）
+      const res = await launchAllPlaywrightWindows(activeSiteId);
       setLaunchMsg(res.message);
       // await 确保状态立即同步，不等下一轮 polling
       await fetchSiteWindows();
@@ -374,13 +361,8 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
   const handleCloseWindow = async (sw: PlaywrightSiteWindowState, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      if (isPlaywright) {
-        const staffName = sw.employeeName || sw.windowName;
-        await closePlaywrightWindow(activeSiteId, staffName);
-      } else {
-        // EasyBR legacy mode removed — skip
-      }
-      // Phase 4-I-3: 使用统一 clearInitializing（windowKey）清理标记
+      const staffName = sw.employeeName || sw.windowName;
+      await closePlaywrightWindow(activeSiteId, staffName);
       clearInitializing(sw);
       // await 确保状态立即同步，不等下一轮 polling
       await fetchSiteWindows();
@@ -501,14 +483,11 @@ export default function Header({ sidebarCollapsed }: HeaderProps) {
               onMouseLeave={() => setHoveredWindow(null)}
               onClick={() => {
                 if (isInitializing || launching) return;
-                // ★ Phase 4-B：playwright 模式下，非 ready 非 busy 状态点击重新 ensure
-                //   （支持 about:blank/多标签页 → 点击 → 自动收敛为 1 个业务页）
-                if (isPlaywright) {
-                  if (effectiveStatus === 'busy' || effectiveStatus === 'ready') return;
-                  handleInitWindow(sw);
-                  return;
-                }
-                // EasyBR legacy mode removed — clicking does nothing for offline windows
+                // Phase 4-B：非 ready 非 busy 状态点击重新 ensure
+                // （支持 about:blank/多标签页 → 点击 → 自动收敛为 1 个业务页）
+                if (effectiveStatus === 'busy' || effectiveStatus === 'ready') return;
+                handleInitWindow(sw);
+                return;
               }}
               title={`${fullLabel}\n状态：${getWindowStatusLabel(effectiveStatus)}${
                 effectiveStatus === 'failed'

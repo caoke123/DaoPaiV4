@@ -358,45 +358,16 @@ async function main(): Promise<void> {
     })();
   });
 
-  // D-0B: BrowserPool 初始化（best-effort，不阻塞 Express 启动）
-  // 失败时 runtimeStatus 标记为 unavailable，Express 仍正常服务 Auth / 任务中心
-  console.log('[启动] 初始化 BrowserPool（best-effort）...');
+  // D-0B: BrowserPool 初始化（EasyBR API 自动扫描已移除）
+  // V3 生产路径使用 PlaywrightRuntime 管理窗口，不再依赖 EasyBR API 自动连接。
+  // BrowserPool 保留用于 InitWindowHandler（手动初始化窗口）和 legacy fallback。
+  // RuntimeStatus 直接标记为 available，不再等待 EasyBR 扫描结果。
+  console.log('[启动] 初始化 BrowserPool（V3 Playwright 模式，跳过 EasyBR 扫描）...');
   let pool: BrowserPool;
   try {
     pool = BrowserPool.getInstance();
-    pool.initialize().then(() => {
-      runtimeStatus.markAvailable();
-      // Phase D-2B: 注入 autoRelogin 到 SessionManager（用于 Session 自动恢复）
-      const sessionMgr = SessionManager.getInstance();
-      sessionMgr.setRelogin(async (pageToCheck) => {
-        const bp = BrowserPool.getInstance();
-        // 遍历所有连接，找到匹配的 page
-        for (const [, conn] of (bp as any).connections) {
-          if (conn.page === pageToCheck) {
-            try {
-              await (bp as any).checkAndAutoLogin(pageToCheck, conn.windowInfo.name);
-              return true;
-            } catch {
-              return false;
-            }
-          }
-        }
-        return false;
-      });
-
-      // Phase D-2B: 为所有已连接窗口启动心跳（60 秒保活）
-      const connectedCount = (pool as any).connections.size;
-      for (const [windowId, conn] of (pool as any).connections) {
-        if (conn.windowInfo.is_connected === 1) {
-          sessionMgr.startHeartbeat(windowId, conn.page);
-        }
-      }
-      console.log(`[SessionManager] 已为 ${connectedCount} 个窗口启动心跳`);
-    }).catch(e => {
-      runtimeStatus.markUnavailable(e.message);
-      console.error('[启动] BrowserPool 初始化失败（不影响 Express）:', e.message);
-      console.error('[启动] 请确认本地浏览器执行端已开启所有窗口');
-    });
+    runtimeStatus.markAvailable();
+    console.log('[启动] RuntimeStatus → available（V3 Playwright 模式）');
 
     // Phase G-2: 周期健康巡检（30 秒）— 由 HealthMonitor 管理
     pool.startHealthMonitor(30 * 1000);
