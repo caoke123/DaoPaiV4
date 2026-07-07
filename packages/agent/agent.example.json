@@ -1,0 +1,23 @@
+{
+  "cloudApiUrl": "http://localhost:3300",
+  "cloudBaseUrl": "http://localhost:3300",
+  "tenantId": "tenant_xxx",
+  "siteId": "site_xxx",
+  "workstationId": "ws_xxx",
+  "agentToken": "agent_token_xxx",
+  "workstationName": "天南大-前台电脑01",
+  "settingsPath": "../../data/settings.json",
+  "browser": {
+    "executablePath": "chrome/chrome.exe",
+    "userDataDir": "profiles/default",
+    "debugPort": 9223,
+    "headless": false
+  },
+  "bnsy": {
+    "loginUrl": "https://bnsy.benniaosuyun.com/login"
+  },
+  "logLevel": "info",
+  "pollIntervalMs": 3000,
+  "heartbeatIntervalMs": 15000,
+  "taskPollIntervalMs": 3000
+}

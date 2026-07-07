@@ -1,0 +1,15 @@
+# DaoPai V4 开发环境覆盖配置
+#
+# 说明：
+#   - V4 保留 postgres 端口映射（5437:5432），本地开发时后端通过 127.0.0.1:5437 连接 PG
+#   - V4 与 V3 完全隔离
+#   - 此文件保留为空覆盖，避免影响 docker-compose.yml 的默认配置
+services:
+  daopai-v4-postgres:
+    # 开发环境保留端口映射，方便本地直连 PG 排查
+    ports:
+      - "5437:5432"
+  daopai-v4-redis:
+    # 开发环境保留 Redis 端口映射，方便本地排查
+    ports:
+      - "6382:6379"

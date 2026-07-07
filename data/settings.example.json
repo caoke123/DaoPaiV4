@@ -1,0 +1,35 @@
+{
+  "initialized": true,
+  "pinHash": "<SHA256 hash of PIN, optional - generate via scripts>",
+  "pinSalt": "<random salt, optional>",
+  "runtime": {
+    "mode": "playwright",
+    "dryRunMode": true
+  },
+  "sites": [
+    {
+      "id": "site-example-001",
+      "name": "示例网点",
+      "windows": [
+        {
+          "windowName": "示例网点-员工A",
+          "employeeName": "员工A",
+          "username": "example_user_a",
+          "password": "example_password_a",
+          "easybrBrowserId": ""
+        },
+        {
+          "windowName": "示例网点-员工B",
+          "employeeName": "员工B",
+          "username": "example_user_b",
+          "password": "example_password_b",
+          "easybrBrowserId": ""
+        }
+      ]
+    }
+  ],
+  "dataRetention": {
+    "retentionDays": 30,
+    "cleanupFrequency": "weekly"
+  }
+}

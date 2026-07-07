@@ -1,0 +1,67 @@
+version: "3.8"
+
+# ══════════════════════════════════════════════════════════════
+# DaoPai V4 — Playwright 原生 + Agent 方向
+#
+# 隔离声明（与 DaoPai V3 完全隔离）：
+#   - 容器名前缀: daopai-v4-*
+#   - volume 前缀: daopai_v4_*
+#   - 数据库: daopai_v4
+#   - PG 端口: 5437
+#   - Redis 端口: 6382
+#   - 应用端口: 3400
+#   - network: daopai_v4_network
+# ══════════════════════════════════════════════════════════════
+
+services:
+  # ────────────────────────────────────────────────────────────
+  # PostgreSQL 16 — DaoPai V4 数据库（daopai_v4）
+  # ────────────────────────────────────────────────────────────
+  daopai-v4-postgres:
+    image: postgres:16
+    container_name: daopai-v4-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: daopai_v4
+      POSTGRES_USER: daopai_v4
+      POSTGRES_PASSWORD: daopai_v4_secret
+    ports:
+      - "5437:5432"
+    volumes:
+      - daopai_v4_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U daopai_v4 -d daopai_v4"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - daopai_v4_network
+
+  # ────────────────────────────────────────────────────────────
+  # Redis 7 — V4 独立缓存
+  # ────────────────────────────────────────────────────────────
+  daopai-v4-redis:
+    image: redis:7
+    container_name: daopai-v4-redis
+    restart: unless-stopped
+    ports:
+      - "6382:6379"
+    volumes:
+      - daopai_v4_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - daopai_v4_network
+
+volumes:
+  daopai_v4_pgdata:
+    name: daopai_v4_pgdata
+  daopai_v4_redisdata:
+    name: daopai_v4_redisdata
+
+networks:
+  daopai_v4_network:
+    name: daopai_v4_network

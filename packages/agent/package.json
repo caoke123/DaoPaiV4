@@ -1,0 +1,32 @@
+{
+  "name": "daopai-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DaoPai 本地执行端 — 安装在本机执行浏览器自动化任务",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test:chrome": "tsx src/testPortableChrome.ts",
+    "test:bnsy": "tsx src/testBnsyLoginPage.ts",
+    "test:bnsy:safety": "tsx src/testBnsyLoginSafety.ts",
+    "test:bnsy:login": "tsx src/testBnsyLoginFlow.ts",
+    "test:bnsy:p0": "tsx src/testBnsySessionP0.ts",
+    "test:arrival:browser": "tsx src/testArrivalBrowserDryRun.ts",
+    "test:dispatch:browser": "tsx src/testDispatchBrowserDryRun.ts",
+    "test:integrated:browser": "tsx src/testIntegratedBrowserDryRun.ts",
+    "test:sign:browser": "tsx src/testSignBrowserDryRun.ts",
+    "audit:integrated:dom": "tsx src/auditIntegratedDom.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "playwright-core": "^1.52.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,70 @@
+# 依赖
+node_modules/
+frontend/node_modules/
+
+# 构建产物与缓存
+dist/
+frontend/dist/
+build/
+.turbo/
+.vite/
+.cache/
+.next/
+coverage/
+
+# 日志和临时文件
+*.log
+*.tmp
+
+# 数据库文件（含运行时数据）
+data/*.db
+data/*.db-journal
+data/*.json
+!data/settings.example.json
+data/results/
+data/postgres/
+
+# 归档文件（本地备份，不提交）
+archive/
+
+# 浏览器缓存与 profiles（禁止提交）
+profiles/
+**/profiles/
+runtime/profiles/
+runtime/chrome-profile/
+runtime/chrome-profile-test/
+
+# 运行时日志、截图、下载
+runtime/logs/
+runtime/screenshots/
+runtime/downloads/
+runtime/browser-session.json
+
+# 便携版 Chrome（不提交）
+Chrome/
+
+# 环境变量
+.env
+.env.*
+!.env.example
+
+# 敏感凭据（含真实账号密码，禁止提交）
+backend/config/credentials.ts
+
+# Agent 本地配置（含执行电脑授权码）
+packages/agent/agent.json
+packages/agent/logs/
+packages/agent/node_modules/
+packages/agent/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Debug artifacts
+.dbg/
+debug-*.md
